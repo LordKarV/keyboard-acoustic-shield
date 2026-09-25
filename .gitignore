@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets
+.env
+.env.*
+
+# Data & model artifacts (large / not source)
+data/
+runs/
+vendor/
+*.pt
+*.npz
+*.log
+
+# Tooling / OS / internal notes
+.tycho/
+.DS_Store
+HANDOFF.md
+WIN.md
