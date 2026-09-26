@@ -111,49 +111,72 @@ def calibrate(rounds=1, secs=45):
     print(f"\nCalibrated attacker saved -> {LIVE_CKPT}. Now run: record")
 
 
-def bank(per_key=20, secs_per_key=9.0, out="data/live_bank.npz"):
+def _extract_clips(y, events, clip_len):
+    """Cut a CLIP-length clip per keystroke, robust to quiet mics + keylog latency:
+    peak-normalize, and for each keylog time search a window forward for the actual
+    click (loudest smoothed-energy point), keep it only if that peak stands out
+    above the recording's own noise floor (relative, not a fixed absolute gate)."""
+    import numpy as np
+    y = y.astype(np.float32)
+    peak = float(np.max(np.abs(y))) + 1e-9
+    y = y / peak                                   # peak-normalize (handles quiet mic gain)
+    env = np.abs(y)
+    w = max(1, int(0.003 * SR))
+    env = np.convolve(env, np.ones(w) / w, mode="same")
+    floor = float(np.median(env)) + 1e-6           # noise floor of THIS recording
+    pre, post = int(0.05 * SR), int(0.30 * SR)     # search from just before keylog to +300ms (mic latency)
+    cs = []
+    for e in events:
+        t = int(e["t"] * SR)
+        a0, b0 = max(0, t - pre), min(len(y), t + post)
+        if b0 - a0 < w:
+            continue
+        pk = a0 + int(np.argmax(env[a0:b0]))
+        if env[pk] < max(4.0 * floor, 0.03):       # click must stand out (relative + tiny absolute)
+            continue
+        a = max(0, pk - int(0.02 * SR))
+        c = np.zeros(clip_len, np.float32)
+        s = y[a:a + clip_len]; c[:len(s)] = s
+        cs.append(c)
+    return cs
+
+
+def bank(per_key=20, secs_per_key=9.0, out="data/live_bank.npz", missing_only=False, min_clips=8):
     """Build a clean, BALANCED per-key acoustic bank for YOUR keyboard: for each
-    of the 36 keys you tap it ~per_key times; we take exactly those keystrokes
-    (labeled by the keylog, snapped to audio onsets) and save 0.12s clips to an
-    .npz the trainer/synth engine uses (KEYGUARD_BANK=data/live_bank.npz).
-    Better than a paragraph: guaranteed even coverage of rare keys and digits."""
+    key you tap it ~per_key times (QUIETLY); we cut a 0.12s clip per keystroke
+    (labeled by the keylog) into an .npz the trainer/synth engine uses
+    (KEYGUARD_BANK=data/live_bank.npz). MERGES with an existing bank, so you can
+    re-run with --missing to only fill in keys you don't have enough of yet."""
     import os
     import numpy as np
-    from .. import segment
     from ..config import CLASSES
     from ..ctc.data import CLIP
     clips = {}
-    print(f"Per-key bank: for each key, tap it ~{per_key} times at a steady pace.\n"
-          f"(run this in a real terminal so ENTER prompts work)\n")
-    for k in CLASSES:
+    if os.path.exists(out):                         # merge with what we already have
+        d = np.load(out)
+        clips = {k: d[k] for k in d.files}
+        print(f"merging into existing {out}: {len(clips)}/36 keys present")
+    todo = [k for k in CLASSES if (not missing_only) or len(clips.get(k, [])) < min_clips]
+    print(f"capturing {len(todo)} keys: {todo}\n"
+          f"tap each ~{per_key} times and STAY QUIET (no talking) — this is the CLEAN "
+          f"alphabet; noise robustness is tested separately. Run in a real terminal.\n")
+    for i, k in enumerate(todo):
         try:
-            input(f"  [{len(clips)+1}/36] press ENTER, then tap '{k}' ~{per_key} times...")
+            input(f"  [{i+1}/{len(todo)}] press ENTER, then tap '{k}' ~{per_key} times (quietly)...")
         except EOFError:
-            print("  (no stdin — run in a terminal, not via '!')"); return
+            print("  (no stdin — run in a terminal, not via '!')"); break
         y, ev = _record(secs_per_key)
-        au = segment.onsets(y)
-        cs = []
-        for e in ev:
-            if e["key"] != k:
-                continue
-            t = int(e["t"] * SR)
-            if len(au):
-                j = int(np.argmin(np.abs(au - t)))
-                if abs(au[j] - t) < 0.15 * SR:
-                    t = int(au[j])
-            a = max(0, t - int(0.02 * SR)); c = np.zeros(CLIP, np.float32)
-            s = y[a:a + CLIP]; c[:len(s)] = s
-            if np.abs(c).max() > 1e-3:
-                cs.append(c)
+        cs = _extract_clips(y, [e for e in ev if e["key"] == k], CLIP)
         if cs:
-            clips[k] = np.stack(cs)
+            clips[k] = np.stack(cs)                 # replace with the fresh (quiet) capture
         print(f"      got {len(cs)} clean '{k}' clips")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     np.savez(out, **clips)
     miss = [k for k in CLASSES if k not in clips]
     print(f"\nsaved {out}: {len(clips)}/36 keys, {sum(len(v) for v in clips.values())} clips.")
     if miss:
-        print(f"MISSING {miss} — re-run to add them.")
+        print(f"MISSING {miss} -- re-run to add just these:  "
+              f"python -m keyguard.agents.live bank --missing")
     else:
         print("all 36 keys captured. Next, adapt the attacker to your keyboard:\n"
               "  KEYGUARD_BANK=data/live_bank.npz KEYGUARD_CKPT=runs/ctc_live.pt \\\n"
@@ -189,12 +212,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("calibrate")
-    bp = sub.add_parser("bank"); bp.add_argument("--per-key", type=int, default=20)
+    bp = sub.add_parser("bank"); bp.add_argument("--per-key", type=int, default=20); bp.add_argument("--missing", action="store_true")
     rp = sub.add_parser("record"); rp.add_argument("--secs", type=float, default=20); rp.add_argument("--defend", action="store_true")
     a = ap.parse_args()
     if a.cmd == "calibrate":
         calibrate()
     elif a.cmd == "bank":
-        bank(per_key=a.per_key)
+        bank(per_key=a.per_key, missing_only=a.missing)
     else:
         record(a.secs, a.defend)
