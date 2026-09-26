@@ -7,7 +7,7 @@ just like fast typing -- and the typed string is the exact CTC target. Sound add
 linearly, so overlap-add at digraph-timed offsets is a faithful model of
 overlapping typing. Unlimited labeled data for a sequence model.
 
-Vocab: index 0 = CTC blank, 1..36 = config.CLASSES (a-z, 0-9). Spaces are gaps
+Vocab: index 0 = CTC blank, 1..37 = config.CLASSES (a-z, 0-9, space). Word gaps
 (no emitted symbol) in v1.
 """
 from __future__ import annotations

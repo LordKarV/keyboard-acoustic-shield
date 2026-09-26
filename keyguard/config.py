@@ -24,7 +24,9 @@ HOP = 128               # ~8ms hops -> ~38 frames per 0.3s window
 ONSET_MIN_GAP_S = 0.10  # keys can't be closer than this
 ONSET_PROM = 0.10       # peak prominence as fraction of max envelope
 
-# 26 letters + 10 digits, matches Harrison MBPWavs
-CLASSES = [chr(c) for c in range(ord("A"), ord("Z") + 1)] + [str(d) for d in range(10)]
+# 26 letters + 10 digits + space (spacebar is acoustically distinct; recognizing it
+# gives word boundaries that hugely help LM reconstruction). Harrison MBPWavs is A-Z0-9
+# only, so space is learned from real continuous samples (labels.jsonl), not bank synth.
+CLASSES = [chr(c) for c in range(ord("A"), ord("Z") + 1)] + [str(d) for d in range(10)] + [" "]
 CLS_IDX = {c: i for i, c in enumerate(CLASSES)}
 N_CLASSES = len(CLASSES)
