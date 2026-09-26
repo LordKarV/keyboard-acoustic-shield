@@ -66,6 +66,8 @@ LAMBDA_ONSET = float(os.environ.get("KEYGUARD_LAMBDA_ONSET", "0.5"))  # onset-BC
 LAMBDA_FRAME = float(os.environ.get("KEYGUARD_LAMBDA_FRAME", "1.0"))   # dense frame-CE weight (primary loss)
 LAMBDA_CTC = float(os.environ.get("KEYGUARD_LAMBDA_CTC", "0.0"))       # CTC weight (0=off; small values add timing/overlap modeling)
 BLANK_W = float(os.environ.get("KEYGUARD_BLANK_W", "0.05"))           # blank class weight in frame-CE (down-weight to beat imbalance)
+LABEL_SMOOTH = float(os.environ.get("KEYGUARD_LABEL_SMOOTH", "0.0"))  # frame-CE label smoothing (0.1 helps unseen typists)
+FOCAL_GAMMA = float(os.environ.get("KEYGUARD_FOCAL_GAMMA", "0.0"))    # focal frame-CE gamma (0=off; ~1.5 focuses on hard substitution frames)
 BETA_ENT = float(os.environ.get("KEYGUARD_BETA_ENT", "0.0"))          # entropy bonus (0 with dense frame-CE; we want confident onsets)
 BETA_ENT0 = float(os.environ.get("KEYGUARD_BETA_ENT0", str(BETA_ENT)))  # entropy weight at step 0 (annealed -> BETA_ENT)
 ENT_ANNEAL = int(os.environ.get("KEYGUARD_ENT_ANNEAL", "0"))          # steps to anneal BETA_ENT0 -> BETA_ENT (0=off)
@@ -174,6 +176,22 @@ def load_skaid(path, seed=0, aug=True):
 SPEC_AUG = os.environ.get("KEYGUARD_SPEC_AUG", "0") != "0"
 
 
+FREQ_MASK = int(os.environ.get("KEYGUARD_FREQ_MASK", "0"))   # # of frequency masks (timing-safe SpecAugment)
+FREQ_MASK_W = int(os.environ.get("KEYGUARD_FREQ_MASK_W", "8"))  # max mel bins per mask
+
+
+def _freq_mask(m, rng):
+    """Frequency-only SpecAugment: mask mel bands (NO time shift, so per-frame
+    onset/frame-CE labels stay aligned). m: (T, mel)."""
+    m = m.copy()
+    fill = float(m.mean())
+    for _ in range(FREQ_MASK):
+        w = int(rng.integers(1, FREQ_MASK_W + 1))
+        s = int(rng.integers(0, max(1, m.shape[1] - w)))
+        m[:, s:s + w] = fill
+    return m
+
+
 def _collate(items, rng, spec_aug=SPEC_AUG):
     maxT = max(m.shape[0] for m, *_ in items)
     B = len(items)
@@ -185,6 +203,8 @@ def _collate(items, rng, spec_aug=SPEC_AUG):
     for i, (m, lab, on, fk, _) in enumerate(items):
         if spec_aug:
             m = augment.spec_augment(m, rng)
+        if FREQ_MASK > 0:
+            m = _freq_mask(m, rng)
         t = m.shape[0]
         mel[i, :t] = torch.from_numpy(np.ascontiguousarray(m))
         onset[i, :t] = torch.from_numpy(on)
@@ -279,8 +299,22 @@ def train():
     bce = nn.BCEWithLogitsLoss(reduction="none")
     # class-weighted dense frame-CE: down-weight blank so the ~4% keystroke frames
     # dominate; -100 padding ignored. This is the primary anti-collapse loss.
+    # label smoothing calibrates on unseen typists; focal (gamma>0) concentrates
+    # gradient on hard, low-margin substitution frames.
     fce_w = torch.ones(len(VOCAB), device=DEVICE); fce_w[BLANK] = BLANK_W
-    fce = nn.CrossEntropyLoss(weight=fce_w, ignore_index=-100)
+    if FOCAL_GAMMA > 0:
+        _ce_none = nn.CrossEntropyLoss(weight=fce_w, ignore_index=-100,
+                                       label_smoothing=LABEL_SMOOTH, reduction="none")
+
+        def fce(pred, tgt):
+            ce = _ce_none(pred, tgt)                       # (N,) per-frame, 0 where ignored
+            pt = torch.exp(-ce.clamp(max=30))             # ~ p_true
+            valid = (tgt != -100)
+            foc = ((1 - pt) ** FOCAL_GAMMA) * ce
+            return foc[valid].mean() if valid.any() else foc.sum()
+    else:
+        fce = nn.CrossEntropyLoss(weight=fce_w, ignore_index=-100,
+                                  label_smoothing=LABEL_SMOOTH)
     brng = np.random.default_rng(1234)
     best = 1e9
     t0 = time.time()
