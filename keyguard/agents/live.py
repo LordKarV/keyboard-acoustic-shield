@@ -111,6 +111,55 @@ def calibrate(rounds=1, secs=45):
     print(f"\nCalibrated attacker saved -> {LIVE_CKPT}. Now run: record")
 
 
+def bank(per_key=20, secs_per_key=9.0, out="data/live_bank.npz"):
+    """Build a clean, BALANCED per-key acoustic bank for YOUR keyboard: for each
+    of the 36 keys you tap it ~per_key times; we take exactly those keystrokes
+    (labeled by the keylog, snapped to audio onsets) and save 0.12s clips to an
+    .npz the trainer/synth engine uses (KEYGUARD_BANK=data/live_bank.npz).
+    Better than a paragraph: guaranteed even coverage of rare keys and digits."""
+    import os
+    import numpy as np
+    from .. import segment
+    from ..config import CLASSES, CLIP
+    clips = {}
+    print(f"Per-key bank: for each key, tap it ~{per_key} times at a steady pace.\n"
+          f"(run this in a real terminal so ENTER prompts work)\n")
+    for k in CLASSES:
+        try:
+            input(f"  [{len(clips)+1}/36] press ENTER, then tap '{k}' ~{per_key} times...")
+        except EOFError:
+            print("  (no stdin — run in a terminal, not via '!')"); return
+        y, ev = _record(secs_per_key)
+        au = segment.onsets(y)
+        cs = []
+        for e in ev:
+            if e["key"] != k:
+                continue
+            t = int(e["t"] * SR)
+            if len(au):
+                j = int(np.argmin(np.abs(au - t)))
+                if abs(au[j] - t) < 0.15 * SR:
+                    t = int(au[j])
+            a = max(0, t - int(0.02 * SR)); c = np.zeros(CLIP, np.float32)
+            s = y[a:a + CLIP]; c[:len(s)] = s
+            if np.abs(c).max() > 1e-3:
+                cs.append(c)
+        if cs:
+            clips[k] = np.stack(cs)
+        print(f"      got {len(cs)} clean '{k}' clips")
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    np.savez(out, **clips)
+    miss = [k for k in CLASSES if k not in clips]
+    print(f"\nsaved {out}: {len(clips)}/36 keys, {sum(len(v) for v in clips.values())} clips.")
+    if miss:
+        print(f"MISSING {miss} — re-run to add them.")
+    else:
+        print("all 36 keys captured. Next, adapt the attacker to your keyboard:\n"
+              "  KEYGUARD_BANK=data/live_bank.npz KEYGUARD_CKPT=runs/ctc_live.pt \\\n"
+              "    python -m keyguard.ctc.train_overlap 3000\n"
+              "then: python -m keyguard.agents.live record --secs 20")
+
+
 def record(secs, defend=False):
     net, ck = _load_net()
     y, ev = _record(secs)
@@ -139,9 +188,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("calibrate")
+    bp = sub.add_parser("bank"); bp.add_argument("--per-key", type=int, default=20)
     rp = sub.add_parser("record"); rp.add_argument("--secs", type=float, default=20); rp.add_argument("--defend", action="store_true")
     a = ap.parse_args()
     if a.cmd == "calibrate":
         calibrate()
+    elif a.cmd == "bank":
+        bank(per_key=a.per_key)
     else:
         record(a.secs, a.defend)
