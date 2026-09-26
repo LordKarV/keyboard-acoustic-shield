@@ -28,10 +28,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .. import config
+from .. import audio, config
 from ..config import SR
 from . import augment
-from .data import synth_line, random_text, sample_bank, VOCAB, BLANK, CLIP
+from .data import synth_line, random_text, sample_bank, SYM_OF_KEY, VOCAB, BLANK, CLIP
 from .model import logmel, greedy_decode, DEVICE, HOP, N_MELS
 from .mtl_probe import MtlCTC, onset_target
 from .overlap_eval import cer_str, _ids_to_keys, SPEED_BINS
@@ -46,6 +46,8 @@ WARMUP = 200
 LAMBDA_ONSET = 0.5            # onset-BCE weight (research: 0.3-1.0)
 BETA_ENT = 0.01              # entropy bonus weight (anti-peaky-collapse)
 WPM_FULL = (140, 580)        # full speed range; curriculum reveals fast last
+SKAID = os.environ.get("KEYGUARD_SKAID")   # path to real continuous-typing labels.jsonl
+CHUNK_S = float(os.environ.get("KEYGUARD_CHUNK_S", "5.0"))   # split long sessions
 
 
 def _voip(y: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -76,6 +78,50 @@ def build_pool(n: int, seed: int = 0, aug: bool = True) -> list:
     return pool
 
 
+def _chunk_session(y, keys, onsets, aug, rng):
+    """Split one real session into CHUNK_S-second (logmel, ids, onset_target, gap)
+    tuples — the same format as the synth pool, so train()/eval() are unchanged."""
+    out = []
+    step = int(CHUNK_S * SR)
+    onsets = np.asarray(onsets)
+    for a in range(0, len(y), step):
+        b = a + step
+        sel = np.where((onsets >= a) & (onsets < b))[0]
+        if len(sel) < 2:
+            continue
+        seg = y[a:b].astype(np.float32)
+        if aug:
+            seg = augment.augment_waveform(seg, rng)
+        m = logmel(seg)
+        ids = np.array([SYM_OF_KEY[keys[i]] for i in sel], np.int64)
+        rel = onsets[sel] - a
+        gap = float(np.mean(np.diff(onsets[sel]))) if len(sel) > 1 else step
+        out.append((m, ids, onset_target(m.shape[0], rel), gap))
+    return out
+
+
+def load_skaid(path, seed=0, aug=True):
+    """Real continuous typing -> (train_chunks, test_chunks). Held-out = every 5th
+    session (whole sessions, so a test session's typist/recording is unseen)."""
+    import json
+    rows = [json.loads(l) for l in open(path)]
+    rows = [r for r in rows if r.get("keys") and r.get("onset_samples")]
+    rng = np.random.default_rng(seed)
+    train, test = [], []
+    for i, r in enumerate(sorted(rows, key=lambda r: r["wav"])):
+        wav = os.path.join(os.path.dirname(path), r["wav"])
+        if not os.path.exists(wav):
+            continue
+        keys = [k for k in r["keys"].upper() if k in SYM_OF_KEY]
+        on = [s for k, s in zip(r["keys"].upper(), r["onset_samples"]) if k in SYM_OF_KEY]
+        chunks = _chunk_session(audio.load(wav), keys, on, aug and i % 5 != 0, rng)
+        (test if i % 5 == 0 else train).append(chunks)
+    tr = [c for s in train for c in s]
+    te = [c for s in test for c in s]
+    tr.sort(key=lambda p: -p[3])                # easy (large gap) first for curriculum
+    return tr, te
+
+
 def _collate(items, rng, spec_aug=True):
     maxT = max(m.shape[0] for m, _, _, _ in items)
     B = len(items)
@@ -99,6 +145,24 @@ def _curriculum_slice(pool, step):
     """Fraction of the (gap-sorted) pool visible so far: 40% -> 100% over training."""
     frac = min(1.0, 0.4 + 0.6 * step / max(1, STEPS * 0.6))
     return pool[: max(BATCH, int(frac * len(pool)))]
+
+
+@torch.no_grad()
+def evaluate_chunks(net, chunks, cap=120) -> dict:
+    """CER over real held-out chunks (SKAID). Groups by overlap level for the table."""
+    net.eval()
+    per = []
+    for m, ids, _on, gap in chunks[:cap]:
+        logits, _ = net(torch.from_numpy(m)[None].to(DEVICE))
+        hyp = _ids_to_keys(greedy_decode(logits)[0])
+        ref = "".join(VOCAB[i] for i in ids)
+        ov = float(np.mean(np.diff(np.where(_on > 0.5)[0]) < (CLIP // HOP))) if _on.sum() > 1 else 0.0
+        per.append((cer_str(ref, hyp), gap))
+    if not per:
+        return {"rows": [], "mean_cer": 1.0}
+    cers = [c for c, _ in per]
+    return {"rows": [{"wpm": "real", "overlap": 0.0, "cer": float(np.mean(cers))}],
+            "mean_cer": float(np.mean(cers)), "n_chunks": len(per)}
 
 
 @torch.no_grad()
@@ -132,9 +196,16 @@ def train():
     import json
     print(f"device={DEVICE} bank={BANK} steps={STEPS} pool={POOL} "
           f"batch={BATCH} onset={LAMBDA_ONSET} ent={BETA_ENT}", flush=True)
-    assert len(sample_bank(BANK)) >= 20, f"bank {BANK} has too few keys"
-    pool = build_pool(POOL)
-    print(f"pool {len(pool)} lines (gap-sorted for curriculum); training...", flush=True)
+    skaid_test = None
+    if SKAID:
+        pool, skaid_test = load_skaid(SKAID)
+        print(f"SKAID real data: {len(pool)} train chunks, {len(skaid_test)} held-out "
+              f"test chunks (chunk={CHUNK_S}s)", flush=True)
+        assert len(pool) > BATCH, "not enough SKAID train chunks — check the path"
+    else:
+        assert len(sample_bank(BANK)) >= 20, f"bank {BANK} has too few keys"
+        pool = build_pool(POOL)
+        print(f"pool {len(pool)} synth lines (gap-sorted for curriculum); training...", flush=True)
 
     torch.manual_seed(0)
     net = MtlCTC().to(DEVICE).train()
@@ -164,7 +235,7 @@ def train():
         if DEVICE == "mps" and step % 25 == 0:
             torch.mps.empty_cache()
         if step % 250 == 0 or step == STEPS - 1:
-            e = evaluate(net)
+            e = evaluate_chunks(net, skaid_test) if skaid_test is not None else evaluate(net)
             tag = ""
             if e["mean_cer"] < best:
                 best = e["mean_cer"]; torch.save(net.state_dict(), CKPT); tag = "  <-best"
@@ -173,9 +244,10 @@ def train():
             _print_eval(e, tag)
             net.train()
     print(f"done. best mean CER {best:.1%}; weights {CKPT}", flush=True)
+    final = evaluate_chunks(net, skaid_test) if skaid_test is not None else evaluate(net)
     (config.RUNS / "overlap_train_result.json").write_text(
         json.dumps({"best_mean_cer": best, "steps": STEPS, "device": DEVICE,
-                    "final_eval": evaluate(net)}, indent=2))
+                    "data": "skaid" if SKAID else "synth", "final_eval": final}, indent=2))
 
 
 def demo():
