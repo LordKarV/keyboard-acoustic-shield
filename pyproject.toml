@@ -26,6 +26,7 @@ dependencies = [
     "umap-learn>=0.5.12",
     "uvicorn>=0.54.0",
     "imageio-ffmpeg>=0.6.0",
+    "backboard-sdk>=1.5.19",
 ]
 
 # NOTE: pesq and kenlm are C++-built. They compile on macOS/Linux (teammate's box)
