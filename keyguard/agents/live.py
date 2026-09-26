@@ -36,14 +36,33 @@ CAL_PROMPTS = [
 LIVE_CKPT = str(RUNS / "ctc_live.pt")
 
 
-def _record(secs: float):
+_DEVICE = None   # input device index; set via --device (None = system default)
+
+
+def list_devices():
+    import sounddevice as sd
+    print("input devices (use --device N):")
+    for i, d in enumerate(sd.query_devices()):
+        if d["max_input_channels"] > 0:
+            print(f"  {i:2d}  {d['name'][:55]:55}  in={d['max_input_channels']} "
+                  f"sr={int(d['default_samplerate'])} api={sd.query_hostapis(d['hostapi'])['name']}")
+
+
+def _record(secs: float, device=None):
     """Record mic (device default sr -> 16k) + log real keystrokes. Returns
     (y16, events[list of {t,key}])."""
     import sounddevice as sd
     from pynput import keyboard
     import librosa
-    dev = sd.default.device[0] if isinstance(sd.default.device, (list, tuple)) else None
-    sr_dev = int(sd.query_devices(dev)["default_samplerate"]) if dev is not None else 48000
+    dev = device if device is not None else _DEVICE
+    if dev is None:
+        dev = sd.default.device[0] if isinstance(sd.default.device, (list, tuple)) else None
+    try:
+        sr_dev = int(sd.query_devices(dev)["default_samplerate"])
+    except Exception:
+        sr_dev = 48000
+    if dev is not None:
+        print(f"   [mic] device #{dev}: {sd.query_devices(dev)['name']} @ {sr_dev}Hz")
     chunks, events = [], []
     state = {"t0": None}
 
@@ -57,7 +76,7 @@ def _record(secs: float):
         if ch and (ch.isalnum() or ch == " "):
             events.append({"t": time.monotonic() - state["t0"], "key": ch.upper()})
 
-    stream = sd.InputStream(samplerate=sr_dev, channels=1, dtype="float32", callback=cb)
+    stream = sd.InputStream(samplerate=sr_dev, channels=1, dtype="float32", device=dev, callback=cb)
     kl = keyboard.Listener(on_press=on_press)
     print(f"\n>>> RECORDING for {secs:.0f}s — start typing now (talk too, to test noise)! <<<")
     state["t0"] = time.monotonic(); stream.start(); kl.start()
@@ -257,13 +276,18 @@ def record(secs, defend=False):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--device", type=int, default=None, help="input device index (see `devices`)")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("devices")
     sub.add_parser("calibrate")
     dp = sub.add_parser("diag"); dp.add_argument("--secs", type=float, default=6.0)
     bp = sub.add_parser("bank"); bp.add_argument("--per-key", type=int, default=20); bp.add_argument("--missing", action="store_true")
     rp = sub.add_parser("record"); rp.add_argument("--secs", type=float, default=20); rp.add_argument("--defend", action="store_true")
     a = ap.parse_args()
-    if a.cmd == "calibrate":
+    _DEVICE = a.device
+    if a.cmd == "devices":
+        list_devices()
+    elif a.cmd == "calibrate":
         calibrate()
     elif a.cmd == "diag":
         diag(a.secs)
