@@ -304,7 +304,10 @@ if __name__ == "__main__":
     bp = sub.add_parser("bank"); bp.add_argument("--per-key", type=int, default=20); bp.add_argument("--missing", action="store_true")
     rp = sub.add_parser("record"); rp.add_argument("--secs", type=float, default=20); rp.add_argument("--defend", action="store_true")
     a = ap.parse_args()
-    _DEVICE = a.device
+    import os
+    # --device wins; else KEYGUARD_MIC env (same convention as capture.py) so you set the mic once
+    _DEVICE = a.device if a.device is not None else (
+        int(os.environ["KEYGUARD_MIC"]) if os.environ.get("KEYGUARD_MIC") else None)
     _EXCLUSIVE = a.exclusive
     if a.cmd == "devices":
         list_devices()
