@@ -89,3 +89,89 @@ STOI mixture uses a LibriSpeech example clip with the perturbation tiled over it
 - **Pressure/consistency:** the multipressure result shows even pressure changes on
   the *same* key confuse a sparsely-trained model — bank at the pressure you'll type.
 - **Device pin:** export `KEYGUARD_DEVICE=cpu` (MPS is flaky here).
+
+## Cross-keyboard generalization (diverse-training attempt)
+
+**Verdict: FADED (negative result).** User ask, verbatim: *"train on general
+keyboard audios ... test if it works and if it doesn't u can fade it."* We tried
+it. It doesn't generalize. Keep the per-keyboard-calibration path above.
+
+The prior section showed a *Harrison-only* attacker collapses on other keyboards.
+The obvious next hypothesis: pool MANY keyboards' labeled audio and train one
+**keyboard-agnostic** attacker so no per-keyboard banking is needed. We built the
+diverse pool and ran the honest test.
+
+Reproduce: `KEYGUARD_DEVICE=cpu uv run python3 -m keyguard.eval_generalize`
+Smoke: `... -m keyguard.eval_generalize demo` · Raw: `runs/generalize.json` ·
+Code: `keyguard/eval_generalize.py`
+
+### Data pool — 8 keyboard/mic domains (all ground-truth labeled)
+
+| Domain | Keyboard / channel | n (capped 25/key) | Source |
+|---|---|---|---|
+| `harrison` | MacBook Pro, phone mic + Zoom | 900 | `data/harrison` |
+| `live` | our laptop + our mic | 481 | `data/live_bank.npz` |
+| `mka_mac` | MKA MacBook (direct + Messenger + Zoom) | 648 | MKA, Mendeley `bpt2hvf8n3` |
+| `mka_hp` | MKA HP laptop | 219 | MKA |
+| `mka_lenovo` | MKA Lenovo laptop | 216 | MKA |
+| `mka_msi` | MKA MSI laptop | 216 | MKA |
+| `multipressure` | Pinto et al. keyboard (3 pressures) | 108 | Zenodo `19453177` |
+| `zenodo` | one unknown keyboard | 26 | Zenodo `10623477` |
+
+New download this round: **Multi-Keyboard Acoustic (MKA)** dataset (Mendeley Data
+DOI `10.17632/bpt2hvf8n3`, 2 GB, CC-BY). It has 4 distinct physical keyboards
+(HP/Lenovo/MSI/Mac) with per-press segmented wavs (~6–7 presses/key/platform);
+Mac/Messenger/Zoom are the same physical Mac keyboard over different channels, so
+we group them as one domain (else "keyboard-out" would leak). Non-alphanumeric
+keys (enter, caps, …) dropped → 36-class A–Z/0–9. Everything mapped through the
+project front-end (onset → `KEY_WIN` window → log-mel). Chance = 1/36 = **2.8%**
+top-1, ≈ **8.3%** top-3.
+
+### Results (real, no cherry-picking)
+
+| Test | top-1 | top-3 | Read as |
+|---|---|---|---|
+| **Ceiling** — pool ALL 8 keyboards, 80/20 split *mixing* keyboards | **24.3%** | **43.7%** | model *can* learn keys when it has seen every keyboard |
+| **LOKO mean** — leave-one-keyboard-out, zero-shot on the held-out rig | **2.1%** | **6.4%** | **= chance / below top-3 chance → no generalization** |
+
+Per-held-out (train on the other 7, test zero-shot):
+
+| Held-out keyboard | top-1 | top-3 |
+|---|---|---|
+| harrison | 3.0% | 6.2% |
+| live | 0.4% | 1.5% |
+| multipressure | 1.9% | 7.4% |
+| zenodo | 0.0% | 0.0% |
+| mka_lenovo | 3.7% | 10.2% |
+| mka_hp | 2.3% | 8.7% |
+| mka_msi | 2.8% | 7.9% |
+| mka_mac | 2.8% | 9.3% |
+| **mean** | **2.1%** | **6.4%** |
+
+### What this means (honest)
+
+1. **Diverse-pool training did NOT yield a keyboard-agnostic attacker.** Every
+   held-out keyboard lands at or below chance (mean top-3 6.4% < 8.3% top-3
+   chance). No held-out keyboard clears the KEEP bar (top-3 ≥ ~15%).
+2. **It's not a capacity/label bug — it's domain shift.** The exact same pipeline
+   hits **24.3% / 43.7%** at the ceiling (keyboards mixed into train+test). The
+   ~40-point top-3 gap between ceiling and LOKO *is* the result: per-key acoustics
+   are device-specific (plate resonance, mic, TDoA), and 8 keyboards are nowhere
+   near enough for the net to learn a keyboard-invariant key representation.
+3. **This corroborates the earlier zero-shot collapse** and extends it: pooling
+   many rigs doesn't fix it. Keyboard-agnostic acoustic keystroke recognition is
+   an **open research problem** — it likely needs orders of magnitude more
+   keyboards, and/or explicit domain-invariance (adversarial domain adaptation,
+   per-device normalization), not just "more data thrown in a pot."
+
+### Recommendation
+
+- **Keep the per-keyboard-calibration path** from the section above (bank the
+  target keyboard ≥20–25 presses/key, then transfer-learn). Do **not** ship the
+  pooled attacker as a no-calibration default — it reads an unseen keyboard at
+  chance. `eval_generalize.py` stays as an honest negative-result artifact; it is
+  **not** wired into the demo (`server.py`/`realtime.py`) and nothing overclaims.
+- The defender story is unaffected: the −18 dB adversarial shield still pins a
+  *calibrated* attacker to chance with STOI ≈ 0.99. The generalization failure is
+  purely on the attack side and, if anything, widens the defender's margin.
+
