@@ -10,6 +10,7 @@ model.logmel to corr>0.9999, so gradients transfer to the deployed attacker.
 from __future__ import annotations
 import numpy as np
 import torch
+import torch.nn as nn
 import librosa
 
 from ..config import SR
@@ -82,10 +83,18 @@ def craft(net, y: np.ndarray, lo: int, hi: int, mode: str = "protect",
         if ids:
             tgt_ids = torch.tensor(ids, device=dev)
 
-    # non-cuDNN RNN path so we can backprop to delta with the net in eval mode
-    # (cuDNN RNN backward requires train mode, which would drift BatchNorm stats).
-    cudnn_ctx = torch.backends.cudnn.flags(enabled=False)
-    cudnn_ctx.__enter__()
+    # cuDNN RNN backward requires train mode; put the net in train() for the fast
+    # cuDNN path, but neutralize stochastic/stateful layers so the forward is
+    # deterministic and the model is unchanged: BatchNorm+Dropout -> eval, and any
+    # RNN's internal dropout -> 0 (restored after).
+    was_training = net.training
+    net.train()
+    frozen = []
+    for m in net.modules():
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.Dropout)):
+            frozen.append(("mode", m, m.training)); m.eval()
+        if isinstance(m, (nn.GRU, nn.LSTM, nn.RNN)) and getattr(m, "dropout", 0):
+            frozen.append(("drop", m, m.dropout)); m.dropout = 0.0
     for _ in range(steps):
         yp = y_t + delta * mask
         lg, _ = net(torch_logmel(yp)[None])
@@ -103,7 +112,13 @@ def craft(net, y: np.ndarray, lo: int, hi: int, mode: str = "protect",
             cur = (delta * mask).pow(2).sum().item()
             if cur > budget:
                 delta.data *= (budget / cur) ** 0.5
-    cudnn_ctx.__exit__(None, None, None)
+    for kind, m, val in frozen:
+        if kind == "mode":
+            m.train(val)
+        else:
+            m.dropout = val
+    if not was_training:
+        net.eval()
 
     yp = (y_t + delta * mask).detach().cpu().numpy().astype(np.float32)
     d = yp[lo:hi] - y[lo:hi]

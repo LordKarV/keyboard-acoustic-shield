@@ -1,6 +1,6 @@
 """Arms race (min-max) between the audio defender and a RETRAINING attacker.
 
-Proves adaptivity — i.e. AI — is essential: a FIXED perturbation is clawed back by
+Proves adaptivity - i.e. AI - is essential: a FIXED perturbation is clawed back by
 an attacker that retrains on defended audio, but RE-OPTIMIZING the defender each
 round re-blinds it. Per round we report the protected-span CER right after the
 defender crafts (high = protected) and again after the attacker adapts (drop =
@@ -124,7 +124,7 @@ def main():
     (out / "arms_race.json").write_text(json.dumps(
         {"span_keys": SPAN, "snr_db": a.snr, "clips": len(clips), "history": history}, indent=2))
     print(f"\nInterpretation: each round the fixed perturbation is clawed back by the "
-          f"retraining attacker, and the defender must RE-OPTIMIZE to re-protect — a "
+          f"retraining attacker, and the defender must RE-OPTIMIZE to re-protect - a "
           f"moving target no fixed/garble defense can win. -> {out/'arms_race.json'}")
 
 
