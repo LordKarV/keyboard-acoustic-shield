@@ -261,6 +261,68 @@ def bank(out="data/live_bank.npz", rounds=2):
         print("all 36 keys captured -> retrain with root='data/live_bank.npz'")
 
 
+def _luhn_ok(digits: str) -> bool:
+    """Standard Luhn checksum — a real card number passes this."""
+    ds = [int(c) for c in digits if c.isdigit()]
+    if len(ds) < 2:
+        return False
+    chk = 0
+    for i, d in enumerate(reversed(ds)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        chk += d
+    return chk % 10 == 0
+
+
+def card():
+    """Type a FAKE card/number slowly (as you would reading off a card); the
+    attacker reads it DIGIT-RESTRICTED (masks non-digits) and we score it against
+    the keylog ground truth. Shows the format prior's gain and Luhn validity.
+    Measures the Visa/slow-entry case, which needs no overlap model.
+
+    Attacker precedence: KEYGUARD_ATTACKER env > runs/live_attacker.pt (a Mac
+    calibration from `capture.py calibrate`) > runs/supervised_mbp.pt (Harrison,
+    also a Mac keyboard -> good zero-shot baseline). Try Harrison zero-shot with
+    KEYGUARD_ATTACKER=runs/supervised_mbp.pt, then calibrate for the best number."""
+    import os
+    from keyguard.attackers.supervised import SupervisedAttacker
+    from keyguard.config import CLASSES
+    atk = SupervisedAttacker()
+    order = [os.environ.get("KEYGUARD_ATTACKER"), "runs/live_attacker.pt",
+             "runs/supervised_mbp.pt"]
+    for w in [p for p in order if p]:
+        try:
+            atk.load(w); print(f"attacker: {w}"); break
+        except Exception:
+            continue
+    digit_idx = np.array([CLS_IDX[d] for d in "0123456789"])
+    s = _record_prompt("Type a FAKE 16-digit card number slowly, then ENTER:")
+    y, ev = s.stop()
+    m, labels, onsets = labeled_windows(y, ev)
+    if len(m) == 0:
+        print("no keystrokes captured — check mic/Accessibility permissions"); return
+    keep = np.array([CLASSES[i].isdigit() for i in labels])   # score digits only
+    m, labels = m[keep], labels[keep]
+    if len(m) == 0:
+        print("no DIGITS captured — type a number, not letters"); return
+    proba = atk.predict_proba(m)
+    raw = "".join(atk.classes[i] for i in proba.argmax(1))            # unrestricted
+    restr = "".join("0123456789"[j] for j in proba[:, digit_idx].argmax(1))  # digit-only
+    truth_d = "".join(CLASSES[i] for i in labels)
+    def acc(pred):
+        n = min(len(pred), len(truth_d))
+        return sum(pred[i] == truth_d[i] for i in range(n)) / max(1, len(truth_d))
+    print(f"\n  ground truth      : {truth_d}")
+    print(f"  ATTACK (raw 36-way): {raw}   per-digit {acc(raw):.0%}")
+    print(f"  ATTACK (digit-only): {restr}   per-digit {acc(restr):.0%}"
+          f"   exact={'YES' if restr == truth_d else 'no'}")
+    print(f"  reconstructed Luhn-valid: {_luhn_ok(restr)}"
+          f"   (true Luhn-valid: {_luhn_ok(truth_d)})")
+    print("  note: Luhn/format prior can reject or flag impossible reconstructions.")
+
+
 def selfcheck():
     """Offline: timestamp->window alignment works without any hardware."""
     y = np.zeros(SR * 2, np.float32)
@@ -277,5 +339,5 @@ def selfcheck():
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "selfcheck"
-    {"calibrate": calibrate, "demo": demo, "bank": bank, "selfcheck": selfcheck}.get(
-        mode, selfcheck)()
+    {"calibrate": calibrate, "demo": demo, "bank": bank, "card": card,
+     "selfcheck": selfcheck}.get(mode, selfcheck)()
