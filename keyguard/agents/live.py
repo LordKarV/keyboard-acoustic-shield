@@ -112,11 +112,14 @@ def _load_net(prefer_live=True):
 
 
 def calibrate(rounds=1, secs=45):
-    """Collect labeled typing on YOUR keyboard and fine-tune the attacker to it."""
+    """Collect REAL continuous typing on YOUR keyboard and fine-tune the attacker.
+    Starts from the bank-adapted model (runs/ctc_live.pt) if present, so it combines
+    your per-key acoustic bank with real continuous typing — closing the synth->real
+    gap. Otherwise starts from the SKAID model."""
     import os
     from scipy.signal import find_peaks
-    net, base = _load_net(prefer_live=False)
-    print(f"Calibrating from {base}. You'll type prompts; press keys clearly.")
+    net, base = _load_net(prefer_live=True)     # build on the bank-adapted model if we have it
+    print(f"Calibrating from {base} (real continuous typing -> fine-tune). Type prompts clearly.")
     samples = []  # (logmel, frame_key_target)
     for r in range(rounds):
         for pr in CAL_PROMPTS:
