@@ -20,7 +20,27 @@ dependencies = [
     "scipy>=1.18.1",
     "sounddevice>=0.5.6",
     "soundfile>=0.14.0",
-    "torch>=2.14.0",
+    "symspellpy>=6.7.7",
+    "wordfreq>=3.1.1",
+    "torch>=2.11.0",
     "umap-learn>=0.5.12",
     "uvicorn>=0.54.0",
+    "imageio-ffmpeg>=0.6.0",
 ]
+
+# NOTE: pesq and kenlm are C++-built. They compile on macOS/Linux (teammate's box)
+# but need MSVC on Windows; on the GPU box we run with `uv run --no-sync` and a
+# prebuilt venv, so a plain `uv sync` there may skip them. They aren't used by the
+# overlap attacker trainer (only shield PESQ eval + KenLM decode).
+
+# On WINDOWS only, pull torch from the CUDA 12.8 index (Blackwell/sm_120 support
+# for the RTX 5050 GPU box); the default PyPI torch is CPU-only on Windows. macOS
+# (the teammate's box) and Linux keep the normal PyPI torch (MPS/CPU/CUDA) so this
+# change does not break their `uv sync`.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

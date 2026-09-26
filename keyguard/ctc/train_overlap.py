@@ -32,9 +32,28 @@ from .. import audio, config
 from ..config import SR
 from . import augment
 from .data import synth_line, random_text, sample_bank, SYM_OF_KEY, VOCAB, BLANK, CLIP
-from .model import logmel, greedy_decode, DEVICE, HOP, N_MELS
+from .model import logmel, greedy_decode, DEVICE, HOP, N_MELS, CRNN
 from .mtl_probe import MtlCTC, onset_target
 from .overlap_eval import cer_str, _ids_to_keys, SPEED_BINS
+
+
+class MtlCRNN(CRNN):
+    """CRNN (CNN -> BiGRU -> CTC) + a per-frame onset-BCE head on the RNN features.
+    Slater ACSAC'19 used a recurrent encoder; BiGRU gives the temporal context to
+    disambiguate overlapping clicks that the conv-only ConvCTC lacks. Same
+    (B,T,mel) -> (logits (B,T,S), onset (B,T)) interface as MtlCTC."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.onset_head = nn.Linear(2 * self.rnn.hidden_size, 1)
+
+    def forward(self, x):                     # x: (B,T,mel)
+        x = x.unsqueeze(1).transpose(2, 3)    # (B,1,mel,T)
+        x = self.cnn(x)
+        b, c, f, t = x.shape
+        x = x.permute(0, 3, 1, 2).reshape(b, t, c * f)
+        x, _ = self.rnn(x)                    # (B,T,2*hidden)
+        return self.head(x), self.onset_head(x).squeeze(-1)
 
 BANK = os.environ.get("KEYGUARD_BANK", "data/harrison/MBPWavs")
 CKPT = os.environ.get("KEYGUARD_CKPT", "runs/ctc_overlap.pt")
@@ -43,8 +62,14 @@ POOL = int(os.environ.get("KEYGUARD_POOL", "2000"))
 BATCH = int(os.environ.get("KEYGUARD_BATCH", "16"))
 LR = float(os.environ.get("KEYGUARD_LR", "3e-4"))
 WARMUP = 200
-LAMBDA_ONSET = 0.5            # onset-BCE weight (research: 0.3-1.0)
-BETA_ENT = 0.01              # entropy bonus weight (anti-peaky-collapse)
+LAMBDA_ONSET = float(os.environ.get("KEYGUARD_LAMBDA_ONSET", "0.5"))  # onset-BCE weight (research: 0.3-1.0)
+LAMBDA_FRAME = float(os.environ.get("KEYGUARD_LAMBDA_FRAME", "1.0"))   # dense frame-CE weight (primary loss)
+LAMBDA_CTC = float(os.environ.get("KEYGUARD_LAMBDA_CTC", "0.0"))       # CTC weight (0=off; small values add timing/overlap modeling)
+BLANK_W = float(os.environ.get("KEYGUARD_BLANK_W", "0.05"))           # blank class weight in frame-CE (down-weight to beat imbalance)
+BETA_ENT = float(os.environ.get("KEYGUARD_BETA_ENT", "0.0"))          # entropy bonus (0 with dense frame-CE; we want confident onsets)
+BETA_ENT0 = float(os.environ.get("KEYGUARD_BETA_ENT0", str(BETA_ENT)))  # entropy weight at step 0 (annealed -> BETA_ENT)
+ENT_ANNEAL = int(os.environ.get("KEYGUARD_ENT_ANNEAL", "0"))          # steps to anneal BETA_ENT0 -> BETA_ENT (0=off)
+MODEL = os.environ.get("KEYGUARD_MODEL", "crnn")                       # 'crnn' (BiGRU, best) or 'conv' (ConvCTC) encoder
 WPM_FULL = (140, 580)        # full speed range; curriculum reveals fast last
 SKAID = os.environ.get("KEYGUARD_SKAID")   # path to real continuous-typing labels.jsonl
 CHUNK_S = float(os.environ.get("KEYGUARD_CHUNK_S", "5.0"))   # split long sessions
@@ -60,8 +85,27 @@ def _voip(y: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     return (np.round(z * 64) / 64).astype(np.float32)     # coarse quantize
 
 
+FRAME_WIDTH = int(os.environ.get("KEYGUARD_FRAME_WIDTH", "1"))   # +/- frames labeled as the key
+
+
+def frame_key_target(n_frames: int, onset_samples, ids) -> np.ndarray:
+    """DENSE per-frame CTC-symbol target: blank(0) everywhere, the key id (1..36)
+    at each onset frame (widened +/-FRAME_WIDTH). Trained with a class-weighted CE
+    (blank down-weighted) this turns the CTC head into a per-frame keystroke
+    classifier that emits real keys instead of collapsing to blank — the fix that
+    took real-typing CER from ~100% (chance) to legible. -100 padding is added in
+    _collate for frames beyond the true length."""
+    y = np.zeros(n_frames, dtype=np.int64)                 # blank everywhere
+    for s, k in zip(onset_samples, ids):
+        f = int(s) // HOP
+        for d in range(-FRAME_WIDTH, FRAME_WIDTH + 1):
+            if 0 <= f + d < n_frames and y[f + d] == 0:
+                y[f + d] = int(k)
+    return y
+
+
 def build_pool(n: int, seed: int = 0, aug: bool = True) -> list:
-    """Precompute (logmel, label_ids, onset_target, mean_gap_samples) across speeds."""
+    """Precompute (logmel, label_ids, onset_target, frame_key, mean_gap) across speeds."""
     rng = np.random.default_rng(seed)
     pool = []
     for _ in range(n):
@@ -73,8 +117,9 @@ def build_pool(n: int, seed: int = 0, aug: bool = True) -> list:
             y = _voip(y, rng)
         m = logmel(y)
         gap = float(np.mean(np.diff(on))) if len(on) > 1 else float(len(y))
-        pool.append((m, lab, onset_target(m.shape[0], on), gap))
-    pool.sort(key=lambda p: -p[3])           # easy (large gap) first for curriculum
+        pool.append((m, lab, onset_target(m.shape[0], on),
+                     frame_key_target(m.shape[0], on, lab), gap))
+    pool.sort(key=lambda p: -p[4])           # easy (large gap) first for curriculum
     return pool
 
 
@@ -96,7 +141,8 @@ def _chunk_session(y, keys, onsets, aug, rng):
         ids = np.array([SYM_OF_KEY[keys[i]] for i in sel], np.int64)
         rel = onsets[sel] - a
         gap = float(np.mean(np.diff(onsets[sel]))) if len(sel) > 1 else step
-        out.append((m, ids, onset_target(m.shape[0], rel), gap))
+        out.append((m, ids, onset_target(m.shape[0], rel),
+                    frame_key_target(m.shape[0], rel, ids), gap))
     return out
 
 
@@ -118,31 +164,48 @@ def load_skaid(path, seed=0, aug=True):
         (test if i % 5 == 0 else train).append(chunks)
     tr = [c for s in train for c in s]
     te = [c for s in test for c in s]
-    tr.sort(key=lambda p: -p[3])                # easy (large gap) first for curriculum
+    tr.sort(key=lambda p: -p[4])                # easy (large gap) first for curriculum
     return tr, te
 
 
-def _collate(items, rng, spec_aug=True):
-    maxT = max(m.shape[0] for m, _, _, _ in items)
+# SpecAugment time-shift (np.roll) moves the mel but NOT the per-frame onset/frame-CE
+# labels, which desyncs them and blocks frame-aligned learning. Off by default now that
+# frame-CE is the primary loss; re-enable only with a time-shift-free spec_augment.
+SPEC_AUG = os.environ.get("KEYGUARD_SPEC_AUG", "0") != "0"
+
+
+def _collate(items, rng, spec_aug=SPEC_AUG):
+    maxT = max(m.shape[0] for m, *_ in items)
     B = len(items)
     mel = torch.zeros(B, maxT, N_MELS)
     onset = torch.zeros(B, maxT)
+    fkey = torch.full((B, maxT), -100, dtype=torch.long)   # frame-CE target (-100=ignore)
     in_len = torch.zeros(B, dtype=torch.long)
     tgts, tlen = [], []
-    for i, (m, lab, on, _) in enumerate(items):
+    for i, (m, lab, on, fk, _) in enumerate(items):
         if spec_aug:
             m = augment.spec_augment(m, rng)
         t = m.shape[0]
         mel[i, :t] = torch.from_numpy(np.ascontiguousarray(m))
         onset[i, :t] = torch.from_numpy(on)
+        fkey[i, :t] = torch.from_numpy(fk)
         in_len[i] = t
         tgts.append(torch.from_numpy(lab)); tlen.append(len(lab))
-    return (mel.to(DEVICE), onset.to(DEVICE), in_len,
+    return (mel.to(DEVICE), onset.to(DEVICE), fkey.to(DEVICE), in_len,
             torch.cat(tgts), torch.tensor(tlen, dtype=torch.long))
 
 
+CURRICULUM = os.environ.get("KEYGUARD_CURRICULUM", "1") != "0"
+
+
 def _curriculum_slice(pool, step):
-    """Fraction of the (gap-sorted) pool visible so far: 40% -> 100% over training."""
+    """Fraction of the (gap-sorted) pool visible so far: 40% -> 100% over training.
+    OFF (KEYGUARD_CURRICULUM=0) => full pool every step. For dense frame-CE the
+    curriculum HURTS: the sparsest (largest-gap) chunks it shows first are almost
+    all blank, so blank dominates the CE and the head collapses. Uniform sampling
+    over the whole pool avoids that."""
+    if not CURRICULUM:
+        return pool
     frac = min(1.0, 0.4 + 0.6 * step / max(1, STEPS * 0.6))
     return pool[: max(BATCH, int(frac * len(pool)))]
 
@@ -152,7 +215,7 @@ def evaluate_chunks(net, chunks, cap=120) -> dict:
     """CER over real held-out chunks (SKAID). Groups by overlap level for the table."""
     net.eval()
     per = []
-    for m, ids, _on, gap in chunks[:cap]:
+    for m, ids, _on, _fk, gap in chunks[:cap]:
         logits, _ = net(torch.from_numpy(m)[None].to(DEVICE))
         hyp = _ids_to_keys(greedy_decode(logits)[0])
         ref = "".join(VOCAB[i] for i in ids)
@@ -208,10 +271,16 @@ def train():
         print(f"pool {len(pool)} synth lines (gap-sorted for curriculum); training...", flush=True)
 
     torch.manual_seed(0)
-    net = MtlCTC().to(DEVICE).train()
+    net = (MtlCRNN if MODEL == "crnn" else MtlCTC)().to(DEVICE).train()
+    print(f"model={MODEL} params={sum(p.numel() for p in net.parameters())/1e6:.2f}M "
+          f"onset={LAMBDA_ONSET} ent0={BETA_ENT0}->ent={BETA_ENT}@{ENT_ANNEAL}", flush=True)
     opt = torch.optim.AdamW(net.parameters(), lr=LR, weight_decay=1e-5)
     ctc = nn.CTCLoss(blank=BLANK, zero_infinity=True)
     bce = nn.BCEWithLogitsLoss(reduction="none")
+    # class-weighted dense frame-CE: down-weight blank so the ~4% keystroke frames
+    # dominate; -100 padding ignored. This is the primary anti-collapse loss.
+    fce_w = torch.ones(len(VOCAB), device=DEVICE); fce_w[BLANK] = BLANK_W
+    fce = nn.CrossEntropyLoss(weight=fce_w, ignore_index=-100)
     brng = np.random.default_rng(1234)
     best = 1e9
     t0 = time.time()
@@ -220,15 +289,27 @@ def train():
             g["lr"] = LR * min(1.0, (step + 1) / WARMUP)
         sub = _curriculum_slice(pool, step)
         idx = brng.integers(0, len(sub), size=BATCH)
-        mel, onset, in_len, tgt, tlen = _collate([sub[i] for i in idx], brng)
+        mel, onset, fkey, in_len, tgt, tlen = _collate([sub[i] for i in idx], brng)
         logits, onset_logit = net(mel)
-        logp = logits.log_softmax(-1).permute(1, 0, 2).cpu()
-        loss = ctc(logp, tgt, in_len.clamp(max=logits.shape[1]), tlen)
+        loss = logits.new_zeros(())
+        if LAMBDA_CTC > 0:
+            # CTC on-device for CUDA (the .cpu() is an MPS-only workaround: MPS has
+            # no CTC kernel). Shipping logits to CPU every step kills throughput.
+            logp = logits.log_softmax(-1).permute(1, 0, 2)
+            if DEVICE != "cuda":
+                logp = logp.cpu()
+            loss = loss + LAMBDA_CTC * ctc(logp, tgt.to(logp.device),
+                                           in_len.clamp(max=logits.shape[1]), tlen)
         mask = (torch.arange(mel.shape[1], device=DEVICE)[None] < in_len.to(DEVICE)[:, None]).float()
         loss = loss + LAMBDA_ONSET * (bce(onset_logit, onset) * mask).sum() / mask.sum()
+        # frame-CE: force the CTC head to emit the true key id at each onset frame
+        # (-100 elsewhere is ignored). Directly opposes blank/prior collapse.
+        loss = loss + LAMBDA_FRAME * fce(logits.reshape(-1, logits.shape[-1]), fkey.reshape(-1))
         p = logits.softmax(-1).clamp_min(1e-8)
         ent = -(p * p.log()).sum(-1).mean()                 # posterior entropy
-        loss = loss - BETA_ENT * ent                        # bonus (subtract)
+        beta = BETA_ENT if ENT_ANNEAL <= 0 else (
+            BETA_ENT + (BETA_ENT0 - BETA_ENT) * max(0.0, 1 - step / ENT_ANNEAL))
+        loss = loss - beta * ent                            # bonus (subtract), annealed high->low
         opt.zero_grad(); loss.backward()
         nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         opt.step()
@@ -258,7 +339,7 @@ def demo():
     assert pool and pool[0][0].shape[1] == N_MELS
     net = MtlCTC().to(DEVICE).train()
     rng = np.random.default_rng(0)
-    mel, onset, in_len, tgt, tlen = _collate(pool[:2], rng)
+    mel, onset, fkey, in_len, tgt, tlen = _collate(pool[:2], rng)
     logits, onset_logit = net(mel)
     assert logits.shape[0] == 2 and logits.shape[2] == len(VOCAB)
     assert onset_logit.shape == onset.shape

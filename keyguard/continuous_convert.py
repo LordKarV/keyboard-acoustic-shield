@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -36,14 +37,24 @@ def _load_any(path: Path) -> np.ndarray:
     scratch wav, then reuse the normal 16k-mono loader."""
     if path.suffix.lower() != ".m4a":
         return load(path)
-    with tempfile.NamedTemporaryFile(suffix=".wav") as tmp:
+    # Windows: a NamedTemporaryFile stays open, so ffmpeg can't write it (sharing
+    # violation). Allocate a closed temp path, let ffmpeg own it, then clean up.
+    fd, tmp_name = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(path), "-ac", "1", "-ar", str(SR), tmp.name],
+            ["ffmpeg", "-y", "-i", str(path), "-ac", "1", "-ar", str(SR), tmp_name],
             check=True, capture_output=True,
         )
-        return load(Path(tmp.name))
+        return load(Path(tmp_name))
+    finally:
+        try:
+            os.remove(tmp_name)
+        except OSError:
+            pass
 
 CONT = DATA / "continuous"
+MIN_HIT_RATIO = float(os.environ.get("KEYGUARD_MIN_HIT_RATIO", "0.55"))  # drop poorly-aligned sessions
 SNAP_TOL_S = 0.15
 COARSE_STEP_MS = 10
 FINE_STEP_MS = 1
@@ -64,7 +75,9 @@ def _press_events(csv_path: Path, phase: str) -> list[tuple[int, str]]:
             continue
         key = _alnum_key(r["Key"])
         if key is not None:
-            out.append((int(r["Timestamp (ms)"]), key))
+            # some CSVs got Excel-mangled to scientific notation ("1.75347E+12");
+            # float() parses both that and plain integer-ms strings.
+            out.append((int(float(r["Timestamp (ms)"])), key))
     return out
 
 
@@ -133,6 +146,15 @@ def convert_skaid(src: Path = DATA / "external/skaid", name: str = "skaid") -> P
                 offset = _best_offset_ms(press_ms, onset_ms_sorted, len(y) / SR * 1000)
                 samples = _map_to_samples(press_ms, offset, np.sort(onset_samp))
                 samples = np.clip(samples, 0, len(y) - 1)
+                hits = _score_offset(offset, press_ms, onset_ms_sorted)
+                hit_ratio = hits / len(events)
+                # Quality gate: a session whose keylog clock won't align to the
+                # detected clicks (e.g. Excel-truncated ms timestamps) yields noisy
+                # per-key labels -> skip it rather than poison training.
+                if hit_ratio < MIN_HIT_RATIO:
+                    print(f"{sid}/{task}: SKIP (onset_hits={hits}/{len(events)} "
+                          f"= {hit_ratio:.0%} < {MIN_HIT_RATIO:.0%})")
+                    continue
                 wav_rel = f"{sid}_{task}.wav"
                 sf.write(out_dir / wav_rel, y, SR, subtype="PCM_16")
                 jf.write(json.dumps({
@@ -143,7 +165,7 @@ def convert_skaid(src: Path = DATA / "external/skaid", name: str = "skaid") -> P
                 n_sessions += 1
                 n_keys += len(events)
                 print(f"{sid}/{task}: {len(events)} keys, offset={offset:.0f}ms, "
-                      f"onset_hits={_score_offset(offset, press_ms, onset_ms_sorted)}/{len(events)}")
+                      f"onset_hits={hits}/{len(events)} ({hit_ratio:.0%})")
     print(f"WROTE {out_dir}: {n_sessions} sessions, {n_keys} keystrokes")
     return out_dir
 
