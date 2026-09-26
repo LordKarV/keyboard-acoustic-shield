@@ -36,7 +36,8 @@ CAL_PROMPTS = [
 LIVE_CKPT = str(RUNS / "ctc_live.pt")
 
 
-_DEVICE = None   # input device index; set via --device (None = system default)
+_DEVICE = None       # input device index; set via --device (None = system default)
+_EXCLUSIVE = False   # WASAPI exclusive mode (bypasses Windows mic processing); set via --exclusive
 
 
 def list_devices():
@@ -57,17 +58,23 @@ def _record(secs: float, device=None):
     dev = device if device is not None else _DEVICE
     if dev is None:
         dev = sd.default.device[0] if isinstance(sd.default.device, (list, tuple)) else None
-    try:
-        sr_dev = int(sd.query_devices(dev)["default_samplerate"])
-    except Exception:
-        sr_dev = 48000
+    info = sd.query_devices(dev) if dev is not None else sd.query_devices(sd.default.device[0])
+    sr_dev = int(info.get("default_samplerate", 48000))
+    nch = max(1, int(info.get("max_input_channels", 1)))   # WDM-KS demands native channel count
+    extra = None
+    if _EXCLUSIVE:
+        try:
+            extra = sd.WasapiSettings(exclusive=True)       # bypasses Windows APO (noise suppression)
+        except Exception:
+            extra = None
     if dev is not None:
-        print(f"   [mic] device #{dev}: {sd.query_devices(dev)['name']} @ {sr_dev}Hz")
+        print(f"   [mic] device #{dev}: {info['name']} @ {sr_dev}Hz, {nch}ch"
+              + (" (WASAPI exclusive)" if extra else ""))
     chunks, events = [], []
     state = {"t0": None}
 
     def cb(indata, frames, tinfo, status):
-        chunks.append(indata[:, 0].copy())
+        chunks.append(indata[:, 0].copy())                  # first mic channel
 
     def on_press(key):
         if state["t0"] is None:
@@ -76,7 +83,8 @@ def _record(secs: float, device=None):
         if ch and (ch.isalnum() or ch == " "):
             events.append({"t": time.monotonic() - state["t0"], "key": ch.upper()})
 
-    stream = sd.InputStream(samplerate=sr_dev, channels=1, dtype="float32", device=dev, callback=cb)
+    stream = sd.InputStream(samplerate=sr_dev, channels=nch, dtype="float32", device=dev,
+                            callback=cb, extra_settings=extra)
     kl = keyboard.Listener(on_press=on_press)
     print(f"\n>>> RECORDING for {secs:.0f}s — start typing now (talk too, to test noise)! <<<")
     state["t0"] = time.monotonic(); stream.start(); kl.start()
@@ -277,6 +285,7 @@ def record(secs, defend=False):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", type=int, default=None, help="input device index (see `devices`)")
+    ap.add_argument("--exclusive", action="store_true", help="WASAPI exclusive mode (bypass mic noise-suppression)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("devices")
     sub.add_parser("calibrate")
@@ -285,6 +294,7 @@ if __name__ == "__main__":
     rp = sub.add_parser("record"); rp.add_argument("--secs", type=float, default=20); rp.add_argument("--defend", action="store_true")
     a = ap.parse_args()
     _DEVICE = a.device
+    _EXCLUSIVE = a.exclusive
     if a.cmd == "devices":
         list_devices()
     elif a.cmd == "calibrate":
