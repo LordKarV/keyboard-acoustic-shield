@@ -49,6 +49,20 @@ def list_devices():
                   f"sr={int(d['default_samplerate'])} api={sd.query_hostapis(d['hostapi'])['name']}")
 
 
+def _resolve_mic(spec):
+    """KEYGUARD_MIC -> device index. None/'' = system default; all-digits = index;
+    anything else = case-insensitive name substring (stable across index reshuffles)."""
+    if not spec:
+        return None
+    if spec.isdigit():
+        return int(spec)
+    import sounddevice as sd
+    for i, d in enumerate(sd.query_devices()):
+        if d["max_input_channels"] > 0 and spec.lower() in d["name"].lower():
+            return i
+    raise SystemExit(f"KEYGUARD_MIC='{spec}' matched no input device — run `devices` to list them.")
+
+
 def _record(secs: float, device=None):
     """Record mic (device default sr -> 16k) + log real keystrokes. Returns
     (y16, events[list of {t,key}])."""
@@ -357,9 +371,9 @@ if __name__ == "__main__":
     rp = sub.add_parser("record"); rp.add_argument("--secs", type=float, default=20); rp.add_argument("--defend", action="store_true")
     a = ap.parse_args()
     import os
-    # --device wins; else KEYGUARD_MIC env (same convention as capture.py) so you set the mic once
-    _DEVICE = a.device if a.device is not None else (
-        int(os.environ["KEYGUARD_MIC"]) if os.environ.get("KEYGUARD_MIC") else None)
+    # --device wins; else KEYGUARD_MIC env (index OR name substring — names survive the
+    # device-index reshuffle that happens when mics connect/disconnect).
+    _DEVICE = a.device if a.device is not None else _resolve_mic(os.environ.get("KEYGUARD_MIC"))
     _EXCLUSIVE = a.exclusive
     if a.cmd == "devices":
         list_devices()
