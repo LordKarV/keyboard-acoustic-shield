@@ -13,8 +13,10 @@ import librosa
 from ..config import SR
 from .data import VOCAB, BLANK
 
-DEVICE = ("cuda" if torch.cuda.is_available()
-          else "mps" if torch.backends.mps.is_available() else "cpu")
+import os
+DEVICE = os.environ.get("KEYGUARD_DEVICE") or (
+    "cuda" if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available() else "cpu")
 N_MELS = 64
 N_FFT = 512
 HOP = 128                    # 8ms hop (Slater used 10ms); halves T vs 64 for MPS speed
