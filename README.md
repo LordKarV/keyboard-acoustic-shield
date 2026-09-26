@@ -27,13 +27,13 @@ and the speech is untouched."
 |-----------|--------|------|
 | Keystroke onset segmentation | Done | `keyguard/segment.py` |
 | Mel-spectrogram features | Done | `keyguard/features.py` |
-| **Supervised attacker** (CoAtNet-flavored CNN + SE blocks) | Done — **87% top-1** on Harrison data (chance 2.8%); **37.8% top-1 / 57.1% top-3** on our own laptop-mic bank | `keyguard/attackers/supervised.py` |
+| **Supervised attacker** (CoAtNet-flavored CNN + SE blocks) | Done — **87.2% top-1** on Harrison data (chance 2.8%); **37.8% top-1 / 57.1% top-3** on our own laptop-mic bank | `keyguard/attackers/supervised.py` |
 | Timing-only attacker (leak catcher) | Done | `keyguard/attackers/timing.py` |
 | Overlap/free-typing CTC transcriber | Pipeline verified (~4% CER on synthetic overlap); generalization collapses on weak laptop-mic signal | `keyguard/ctc/` |
 | LM-fused CTC decoder (beam search + char-LM) | Done | `keyguard/ctc/decode.py` |
 | **DSP shield** (STFT inpaint + residue randomization + decoys) | Done (deterministic baseline) | `keyguard/shield/shield.py` |
 | **Neural separator** (speech-preserving) | Done — STOI 0.99, PESQ 2.90; adaptive attacker 86% → 63% | `keyguard/shield/separator.py` |
-| **Adversarial shield D** (min-max, AI-essential centerpiece) | Co-training live on dashboard (`/api/arena`): attacker 60.6% clean → **2.8% shielded (= chance)**, → 18.9% after first retrain round (still running) | `keyguard/shield/adversarial.py` |
+| **Adversarial shield D** (min-max, AI-essential centerpiece) | Done — arena at −18 dB budget (chance 2.8%): attacker **87.2% clean → 2.8% shielded (= chance) every round**; a retraining attacker claws back to ~56% mid-game vs a *frozen* shield, but D re-solves and re-blinds it to **2.8%** each round | `keyguard/shield/adversarial.py` |
 | Synthetic speech+keystroke mixtures | Done (LibriSpeech + keystrokes) | `keyguard/synth.py` |
 | Evaluation harness (adaptive attacker + PESQ/STOI) | Done | `keyguard/eval/` |
 | Dashboard | Done | `keyguard/server.py`, `keyguard/web/` |
@@ -49,10 +49,10 @@ it. But *why* the attack works — and why it's genuinely dangerous — rests on
 pillars:
 
 **Pillar 1 — per-key acoustics.** Each key has a distinguishable sound: the plate
-resonates differently by location, and the time-difference-of-arrival across the
-keyboard shifts with key position. A CNN learns this. On the public
+resonates differently by location, so **per-key timing + spectral (plate-resonance)
+features** distinguish keys. A CNN learns this. On the public
 [Harrison dataset](https://github.com/JBFH-Dev/Keystroke-Datasets) (MacBook Pro,
-phone + Zoom recordings) our CoAtNet-style classifier hits **87% top-1** (chance
+phone + Zoom recordings) our CoAtNet-style classifier hits **87.2% top-1** (chance
 2.8%), reproducing Harrison et al. 2023 (arXiv 2308.01074). On our own laptop-mic
 captured bank the signal is real but weaker — **37.8% top-1 / 57.1% top-3** — laptop
 mic + quiet keys, not a code problem.
@@ -121,18 +121,20 @@ cutting an adaptive attacker 86% → 63%) are the **baselines**. RNNoise-style
 suppression does essentially nothing (86% → 84%). The old "LLM tunes shield config"
 idea is demoted to an optional *proposer*, not the AI story.
 
-**Adversarial shield results (live in the dashboard arena).** The co-training loop
-is served at `/api/arena` from `runs/arena/adv-*/arena.json`. At a **-18 dB**
-perturbation budget (chance = 2.8%):
+**Adversarial shield results (dashboard arena).** The co-training loop is served at
+`/api/arena` from `runs/arena/adv-*/arena.json`. At an inaudible **−18 dB**
+perturbation budget (chance = 2.8%, 36 classes):
 
-- Clean attacker: **60.6%**
-- After the shield: **2.8%** — driven all the way to chance.
-- After the attacker **retrains** on the shielded audio: **18.9%** on the first
-  co-training round (status: running) — far below the clean 60.6%, i.e. the shield
-  holds most of its protection against an adaptive attacker.
+- Clean (unprotected) attacker on Harrison isolated keys: **87.2%**.
+- Shielded, **every round: 2.8% (= chance)** — the deployed shield always drives the
+  attacker to chance.
+- A **retraining** attacker fighting a *frozen* shield partially claws back across
+  rounds — **20.6% → 47.8% → 55.6% → 47.2% → 18.3%** (up to ~56% mid-game) — but D
+  re-solves against it every round and re-blinds it to **2.8%**. Final shielded =
+  **2.8%**.
 
-Full leakage-vs-perceptual curves across all rounds land here as co-training
-completes.
+This is a real bouncing arms race, not a flat monotonic curve: a retraining attacker
+recovers against a static D, but D wins each round it re-optimizes.
 
 ## Metrics (`eval/metrics.py`)
 
@@ -184,16 +186,25 @@ runs/            # trained models, results
 
 ## Honest limits
 - Laptop-mic signal is weak (quiet keys) — the attack works but is far below the
-  87% Harrison number, and the free-typing CTC model doesn't yet generalize off it.
+  87.2% Harrison number, and the free-typing CTC model doesn't yet generalize off it.
 - Random passwords have no language prior, so Pillar 2 can't rescue them — the honest
   hard case, stated as such.
-- The adversarial shield D is the centerpiece; its arena is live (60.6% → 2.8% →
-  18.9% after one retrain round), but co-training to full equilibrium is still running.
+- The adversarial shield D is the centerpiece: at a −18 dB budget the deployed shield
+  drives the attacker to chance (2.8%) every round; a retraining attacker claws back to
+  ~56% mid-game against a frozen shield, but D re-solves and re-blinds it to 2.8%.
 
 ## Credit / reproductions
-- Harrison, Toreini, Mehrnezhad 2023 — *A Practical Deep Learning-Based Acoustic
-  Side Channel Attack on Keyboards* (arXiv 2308.01074). Dataset + supervised attacker.
-- Slater et al., ACSAC 2019 — *Robust keystroke transcription from the acoustic
-  side-channel* — overlap-robust CTC prior for the free-typing transcriber.
-- Carlini & Wagner (adversarial audio), Schönherr et al. (psychoacoustic hiding) —
-  lineage for the perceptually-constrained adversarial shield.
+- **Attack — a faithful reproduction/extension, not a novel attack.** Asonov & Agrawal,
+  IEEE S&P 2004 (*Keyboard Acoustic Emanations* — each key has a distinct sound);
+  Harrison, Toreini, Mehrnezhad 2023 (arXiv 2308.01074, *A Practical Deep Learning-Based
+  Acoustic Side Channel Attack on Keyboards* — up to **95% lab / 93% Zoom**; dataset +
+  supervised attacker); Slater et al., ACSAC 2019 (*Robust keystroke transcription from
+  the acoustic side-channel* — overlap-robust CTC prior for the free-typing transcriber).
+- **Defense — closest prior art is EveGuard.** Chang et al., *EveGuard*, IEEE S&P 2025
+  (arXiv 2411.10034) — adversarial-audio side-channel *defense*, but for the **vibration**
+  channel protecting **spoken speech**; and AntiFake (Yu et al., CCS 2023). Keyguard adapts
+  this adversarial-audio-privacy paradigm to the acoustic **keystroke** side-channel
+  (secret = typed text) — a channel and secret it hasn't been applied to. Carlini & Wagner
+  (adversarial audio) and Schönherr et al. (psychoacoustic hiding) are the underlying
+  lineage. We did not invent adversarial-audio privacy and do not claim to have "solved"
+  the vulnerability.

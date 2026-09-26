@@ -21,10 +21,9 @@ self-supervised-audio-encoder era and used bespoke hardware data.
 a commodity laptop mic. That's the target.
 
 ### Why the attack works — two pillars
-- **Pillar 1 — per-key acoustics.** Plate resonance varies by key location, and the
-  time-difference-of-arrival across the keyboard shifts with position, so keys are
-  distinguishable. A CNN learns this: **87% top-1** on Harrison MacBook data (chance
-  2.8%).
+- **Pillar 1 — per-key acoustics.** Plate resonance varies by key location, so per-key
+  timing + spectral (plate-resonance) features make keys distinguishable. A CNN learns
+  this: **87.2% top-1** on Harrison MacBook data (chance 2.8%).
 - **Pillar 2 — language redundancy.** English carries ~1 bit/char, so a *weak*
   acoustic guess + a language model recovers the text. We feed the attacker's per-key
   **top-3 candidate lattice** to **Gemini** (`gemini-flash-latest`, `attack_lm.py`,
@@ -54,7 +53,7 @@ segmentation.
    rescoring — the 36%→7% lever.
 
 ### Honest status of the attack
-- Isolated-key classifier: **87% top-1** on Harrison; **37.8% top-1 / 57.1% top-3** on
+- Isolated-key classifier: **87.2% top-1** on Harrison; **37.8% top-1 / 57.1% top-3** on
   our own laptop-mic bank (real but weak signal — laptop mic, quiet keys).
 - The CTC transcriber pipeline is **verified** (overfits synthetic overlap to ~4% CER)
   but **generalization collapsed** on the weak laptop-mic signal (same common letters
@@ -102,9 +101,17 @@ perturbation vs a differentiable attacker, with adversarial co-training rounds.
 - **Psychoacoustic hiding** — Schönherr et al. 2019 (adversarial audio under a masking
   threshold). We reuse the perceptual-masking idea as the *constraint* that keeps the
   perturbation inaudible and speech-preserving.
-- Novelty: applying constrained adversarial perturbation to **keystroke privacy**
-  against an **adaptive** eavesdropper, with speech-recognizer transparency as a hard
-  constraint.
+- **Adversarial-audio privacy (the paradigm we adapt, and closest prior art).**
+  EveGuard (Chang et al., IEEE S&P 2025, arXiv 2411.10034) is the closest published work
+  — a learned, speech-preserving adversarial perturbation against a side-channel
+  eavesdropper — but for the **vibration** channel (mmWave/accelerometer/laser)
+  protecting **spoken speech**. AntiFake (Yu et al., CCS 2023) applies the same toolbox
+  to blocking voice cloning. We did **not** invent adversarial-audio privacy.
+- **Defensible novelty:** to our knowledge, the **first perceptually-constrained
+  adversarial shield for the acoustic *keystroke* side-channel** (secret = typed text) —
+  adapting the adversarial-audio-privacy paradigm (EveGuard S&P'25, AntiFake CCS'23) to a
+  channel and a secret it hasn't been applied to, framed as a min-max arms race against a
+  *retraining* attacker. We do not claim to have "solved" the vulnerability.
 
 ### Baselines already measured
 - DSP shield (STFT inpaint + residue randomization + decoys): deterministic baseline.
@@ -112,16 +119,21 @@ perturbation vs a differentiable attacker, with adversarial co-training rounds.
   PESQ 2.90) while cutting an adaptive attacker **86% → 63%**.
 - RNNoise-style suppression: ~no effect (**86% → 84%**).
 
-### Adversarial shield D — live arena numbers
-The co-training loop runs live (served at the dashboard's `/api/arena` from
-`runs/arena/adv-*/arena.json`). At a **-18 dB** perturbation budget (chance = 2.8%):
+### Adversarial shield D — arena numbers
+The co-training loop is served at the dashboard's `/api/arena` from
+`runs/arena/adv-*/arena.json`. At an inaudible **-18 dB** perturbation budget
+(chance = 2.8%, 36 classes):
 
-- clean attacker **60.6%** → shielded **2.8%** (= chance) → **18.9%** after the
-  attacker retrains on the shielded audio (first co-training round, status: running).
+- Clean (unprotected) attacker on Harrison isolated keys: **87.2%**.
+- Shielded, **every round: 2.8% (= chance)** — the deployed shield always drives the
+  attacker to chance.
+- A **retraining** attacker fighting a *frozen* shield claws back across rounds —
+  **20.6% → 47.8% → 55.6% → 47.2% → 18.3%** (up to ~56% mid-game) — but D re-solves
+  against it every round and re-blinds it to **2.8%**. Final shielded = **2.8%**.
 
-So the shield drives leakage to chance and, against an adaptive/retraining attacker,
-still holds the attacker far below the clean baseline. Full leakage-vs-perceptual
-curves across all rounds land here as co-training completes.
+This is a real bouncing arms race, not a flat monotonic curve: a retraining attacker
+recovers against a static D, but D wins each round it re-optimizes and drives the
+attacker back to chance.
 
 ---
 
@@ -140,3 +152,8 @@ curves across all rounds land here as co-training completes.
 - Okada et al. 2026 (arXiv 2607.22094) — self-supervised, isolated keys.
 - Szegedy et al. 2013; Carlini & Wagner 2018 — adversarial examples / adversarial audio.
 - Schönherr et al. 2019 — psychoacoustic adversarial hiding.
+- Chang et al., *EveGuard: Defeating Vibration-based Side-Channel Eavesdropping with
+  Audio Adversarial Perturbations*, IEEE S&P 2025 (arXiv 2411.10034) — closest prior art.
+- Yu et al., *AntiFake: Using Adversarial Audio to Prevent Unauthorized Speech
+  Synthesis*, CCS 2023.
+- Asonov & Agrawal, *Keyboard Acoustic Emanations*, IEEE S&P 2004.

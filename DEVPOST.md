@@ -8,10 +8,10 @@ our own machines and then actually kill it — in a way that survives an attacke
 *fights back*, and where the AI is load-bearing rather than decorative.
 
 ## What it does
-- **Attack (two pillars).** *Pillar 1 — per-key acoustics:* plate resonance +
-  time-difference-of-arrival make keys distinguishable; our CoAtNet-style classifier
-  hits **87% top-1** (chance 2.8%) on the public Harrison dataset, and **37.8% top-1
-  / 57.1% top-3** on our own laptop-mic bank. *Pillar 2 — language redundancy:*
+- **Attack (two pillars).** *Pillar 1 — per-key acoustics:* plate resonance makes keys
+  distinguishable via per-key timing + spectral (plate-resonance) features; our
+  CoAtNet-style classifier hits **87.2% top-1** (chance 2.8%) on the public Harrison
+  dataset, and **37.8% top-1 / 57.1% top-3** on our own laptop-mic bank. *Pillar 2 — language redundancy:*
   English is ~1 bit/char, so a CTC acoustic model + an LM/LLM correction turns weak,
   ~38%-accurate keys into readable English. Random passwords are the honest hard case.
 - **Defense (the centerpiece): a perceptually-constrained adversarial shield.** A
@@ -67,6 +67,19 @@ violates the perceptual constraint. Forcing transparency *and* privacy-robustnes
 once is a genuine min-max no rule solves, and that's what makes the neural shield
 necessary.
 
+## Novelty, honestly
+- **Attack:** a faithful reproduction/extension of prior work (Asonov & Agrawal 2004;
+  Harrison et al. 2023 — up to 95% lab / 93% Zoom; Slater ACSAC'19 for overlap CTC), not
+  a novel attack. Its job is to be a credible, reproducible threat that justifies the
+  defense.
+- **Defense:** the closest prior art is **EveGuard** (IEEE S&P 2025, arXiv 2411.10034) —
+  an adversarial-audio side-channel *defense*, but for the **vibration** channel
+  protecting **spoken speech**. To our knowledge Keyguard is the **first
+  perceptually-constrained adversarial shield for the acoustic *keystroke* side-channel**
+  (secret = typed text), adapting the adversarial-audio-privacy paradigm (EveGuard
+  S&P'25, AntiFake CCS'23) to a channel and secret it hasn't been applied to. We did not
+  invent adversarial-audio privacy and do not claim to have "solved" the vulnerability.
+
 ## Challenges
 - **Signal strength.** Our laptop-mic keys are quiet; the isolated-key attack works
   (37.8% top-1) but the free-typing CTC transcriber, which is pipeline-verified
@@ -75,17 +88,19 @@ necessary.
 - **The deterministic-vs-AI reckoning** above — the honest realization that reframed
   the whole defense.
 - **Tiny transient images.** Aggressive SpecAugment *hurt* the classifier; light
-  noise + jitter is what got us to 87%.
+  noise + jitter is what got us to 87.2%.
 
 ## What's next
 - A stronger/fixed sensor (phone mic Harrison-style, or a contact/accelerometer sensor
   via Arduino) + transfer-learning from Harrison, and a training-collapse fix
   (multi-task onset head), to make free-typing generalize.
-- Run the adversarial co-training arena to full equilibrium. It is already **live on
-  the dashboard** (`/api/arena`): at a -18 dB budget the attacker goes from **60.6%
-  clean → 2.8% shielded (= chance)**, and after retraining against the shield it
-  recovers only to **18.9%** on the first round (co-training still running) — well
-  below clean. Next: report the full leakage-vs-perceptual curve across rounds.
+- Push the adversarial co-training arena further. It runs on the **dashboard**
+  (`/api/arena`): at an inaudible -18 dB budget (chance 2.8%, 36 classes) the clean
+  attacker reads Harrison isolated keys at **87.2%**, the deployed shield drives it to
+  **2.8% (= chance) every round**, and a retraining attacker fighting a frozen shield
+  claws back to ~56% mid-game (**20.6% → 47.8% → 55.6% → 47.2% → 18.3%**) before D
+  re-solves and re-blinds it to **2.8%** — a real bouncing arms race D wins each round,
+  not a flat curve. Next: report the full leakage-vs-perceptual curve across rounds.
 - Real-time BlackHole virtual mic on the victim's side.
 
 ## Prizes targeted
