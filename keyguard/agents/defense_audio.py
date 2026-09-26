@@ -34,9 +34,29 @@ def torch_logmel(y: torch.Tensor) -> torch.Tensor:
     return db.T
 
 
-def decode(net, y: np.ndarray):
+def span_read(net, y: np.ndarray, lo: int, hi: int, thr: float = 0.4, min_gap_ms: float = 90.0) -> str:
+    """Keys the attacker reads for the keystrokes whose ONSET falls in samples
+    [lo:hi] — a position-robust way to score protection of a time region."""
+    from scipy.signal import find_peaks
+    dev = next(net.parameters()).device
     with torch.no_grad():
-        lg, onl = net(torch_logmel(torch.tensor(y, dtype=torch.float32))[None])
+        lg, onl = net(torch_logmel(torch.tensor(y, dtype=torch.float32, device=dev))[None])
+    on = torch.sigmoid(onl)[0].cpu().numpy(); lgn = lg[0].cpu().numpy()
+    dist = max(1, int(min_gap_ms / 1000 * SR / HOP))
+    peaks, _ = find_peaks(on, height=thr, distance=dist)
+    f_lo, f_hi = lo // HOP, hi // HOP
+    out = []
+    for p in peaks:
+        if f_lo <= p < f_hi:
+            a, b = max(0, p - 1), min(len(lgn), p + 2)
+            out.append(VOCAB[lgn[a:b, 1:].mean(0).argmax() + 1])
+    return "".join(out)
+
+
+def decode(net, y: np.ndarray):
+    dev = next(net.parameters()).device
+    with torch.no_grad():
+        lg, onl = net(torch_logmel(torch.tensor(y, dtype=torch.float32, device=dev))[None])
     return onset_gated_decode(lg, onl)
 
 
@@ -47,7 +67,8 @@ def craft(net, y: np.ndarray, lo: int, hi: int, mode: str = "protect",
       mode='protect' : make the protected keystrokes unreadable (push to blank).
       mode='deceive' : steer the protected frames to `target` keys (a false secret).
     Returns (y_defended, info). Perturbation power is projected to >= snr_db (in-span)."""
-    y_t = torch.tensor(y, dtype=torch.float32)
+    dev = next(net.parameters()).device
+    y_t = torch.tensor(y, dtype=torch.float32, device=dev)
     delta = torch.zeros_like(y_t, requires_grad=True)
     mask = torch.zeros_like(y_t); mask[lo:hi] = 1.0
     opt = torch.optim.Adam([delta], lr=lr)
@@ -59,8 +80,12 @@ def craft(net, y: np.ndarray, lo: int, hi: int, mode: str = "protect",
     if mode == "deceive" and target:
         ids = [SYM_OF_KEY.get(c) for c in target.upper() if c in SYM_OF_KEY]
         if ids:
-            tgt_ids = torch.tensor(ids)
+            tgt_ids = torch.tensor(ids, device=dev)
 
+    # non-cuDNN RNN path so we can backprop to delta with the net in eval mode
+    # (cuDNN RNN backward requires train mode, which would drift BatchNorm stats).
+    cudnn_ctx = torch.backends.cudnn.flags(enabled=False)
+    cudnn_ctx.__enter__()
     for _ in range(steps):
         yp = y_t + delta * mask
         lg, _ = net(torch_logmel(yp)[None])
@@ -78,8 +103,9 @@ def craft(net, y: np.ndarray, lo: int, hi: int, mode: str = "protect",
             cur = (delta * mask).pow(2).sum().item()
             if cur > budget:
                 delta.data *= (budget / cur) ** 0.5
+    cudnn_ctx.__exit__(None, None, None)
 
-    yp = (y_t + delta * mask).detach().numpy().astype(np.float32)
+    yp = (y_t + delta * mask).detach().cpu().numpy().astype(np.float32)
     d = yp[lo:hi] - y[lo:hi]
     snr = 10 * np.log10(sig_pow / (np.mean(d ** 2) + 1e-12))
     try:
