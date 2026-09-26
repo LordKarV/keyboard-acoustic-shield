@@ -132,13 +132,60 @@ def _extract_clips(y, events, clip_len):
         if b0 - a0 < w:
             continue
         pk = a0 + int(np.argmax(env[a0:b0]))
-        if env[pk] < max(4.0 * floor, 0.03):       # click must stand out (relative + tiny absolute)
+        # keylog is ground truth (a key WAS pressed), so keep the clip unless the
+        # window is essentially flat noise (no transient the mic could capture).
+        if env[pk] < 1.5 * floor:
             continue
         a = max(0, pk - int(0.02 * SR))
         c = np.zeros(clip_len, np.float32)
         s = y[a:a + clip_len]; c[:len(s)] = s
         cs.append(c)
     return cs
+
+
+def diag(secs=6.0):
+    """Are your keystrokes actually reaching the mic? Tap ~8-10 keys during the
+    window; this reports the recorded level, the noise floor, how many transients
+    stand out, and per-keystroke how loud the click is vs the floor. Saves the wav
+    so we can inspect. If clicks are <~3x the floor, it's mic gain/placement, not
+    the code."""
+    import os
+    import numpy as np
+    import soundfile as sf
+    from ..config import RUNS
+    print("Tap ~8-10 keys during the window (any keys), at your normal volume.")
+    y, ev = _record(secs)
+    if len(y) < 10:
+        print("no audio captured — mic/device problem."); return
+    rms = float(np.sqrt(np.mean(y ** 2))); peak = float(np.max(np.abs(y)))
+    dbfs = 20 * np.log10(peak + 1e-9)
+    env = np.abs(y.astype(np.float32))
+    w = max(1, int(0.003 * SR)); env = np.convolve(env, np.ones(w) / w, "same")
+    floor = float(np.median(env)) + 1e-9
+    from scipy.signal import find_peaks
+    peaks, _ = find_peaks(env, height=3 * floor, distance=int(0.05 * SR))
+    print(f"\naudio: rms={rms:.4f}  peak={peak:.4f}  ({dbfs:.0f} dBFS)  "
+          f"noise_floor={floor:.4f}")
+    print(f"transients >3x floor: {len(peaks)}   |   keylog events: {len(ev)}")
+    ratios = []
+    for e in ev:
+        t = int(e["t"] * SR); a0, b0 = max(0, t - int(0.05 * SR)), min(len(y), t + int(0.3 * SR))
+        pk = float(env[a0:b0].max()) if b0 > a0 else 0.0
+        ratios.append(pk / floor)
+        print(f"  '{e['key']}' @{e['t']:.2f}s: click {pk:.4f} = {pk/floor:.1f}x floor"
+              + ("  <-- too quiet" if pk < 3 * floor else ""))
+    os.makedirs(RUNS / "demo", exist_ok=True)
+    sf.write(RUNS / "demo" / "diag.wav", y, SR)
+    med = float(np.median(ratios)) if ratios else 0.0
+    print(f"\nmedian click/floor = {med:.1f}x  (saved {RUNS/'demo'/'diag.wav'})")
+    if med < 3:
+        print("VERDICT: mic is barely hearing your keys. Move the laptop mic closer to the\n"
+              "  keyboard, raise the input gain (Windows Sound settings -> Input -> device\n"
+              "  properties -> boost/level), disable mic AGC/noise-suppression, or use an\n"
+              "  external mic. Keystroke acoustic attacks need audible key sound.")
+    else:
+        print("VERDICT: keys are audible -> bank capture should work; if a key still gets 0,\n"
+              "  tap it a bit harder/steadier.")
 
 
 def bank(per_key=20, secs_per_key=9.0, out="data/live_bank.npz", missing_only=False, min_clips=8):
@@ -212,11 +259,14 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("calibrate")
+    dp = sub.add_parser("diag"); dp.add_argument("--secs", type=float, default=6.0)
     bp = sub.add_parser("bank"); bp.add_argument("--per-key", type=int, default=20); bp.add_argument("--missing", action="store_true")
     rp = sub.add_parser("record"); rp.add_argument("--secs", type=float, default=20); rp.add_argument("--defend", action="store_true")
     a = ap.parse_args()
     if a.cmd == "calibrate":
         calibrate()
+    elif a.cmd == "diag":
+        diag(a.secs)
     elif a.cmd == "bank":
         bank(per_key=a.per_key, missing_only=a.missing)
     else:
