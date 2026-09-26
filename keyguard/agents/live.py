@@ -120,7 +120,8 @@ def bank(per_key=20, secs_per_key=9.0, out="data/live_bank.npz"):
     import os
     import numpy as np
     from .. import segment
-    from ..config import CLASSES, CLIP
+    from ..config import CLASSES
+    from ..ctc.data import CLIP
     clips = {}
     print(f"Per-key bank: for each key, tap it ~{per_key} times at a steady pace.\n"
           f"(run this in a real terminal so ENTER prompts work)\n")
