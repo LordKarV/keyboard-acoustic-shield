@@ -83,8 +83,16 @@ def _record(secs: float, device=None):
         if ch and (ch.isalnum() or ch == " "):
             events.append({"t": time.monotonic() - state["t0"], "key": ch.upper()})
 
-    stream = sd.InputStream(samplerate=sr_dev, channels=nch, dtype="float32", device=dev,
-                            callback=cb, extra_settings=extra)
+    try:
+        stream = sd.InputStream(samplerate=sr_dev, channels=nch, dtype="float32", device=dev,
+                                callback=cb, extra_settings=extra)
+    except Exception as ex:
+        raise SystemExit(
+            f"\ncould not open device #{dev} ({ex}).\n"
+            "WDM-KS devices often won't open via PortAudio. Try instead:\n"
+            "  --device 9 --exclusive   (WASAPI exclusive on the Intel mic; bypasses suppression)\n"
+            "  or the system default (omit --device) after raising the Windows input level and\n"
+            "  disabling mic enhancements/noise-suppression. See `devices` for the list.")
     kl = keyboard.Listener(on_press=on_press)
     print(f"\n>>> RECORDING for {secs:.0f}s — start typing now (talk too, to test noise)! <<<")
     state["t0"] = time.monotonic(); stream.start(); kl.start()
