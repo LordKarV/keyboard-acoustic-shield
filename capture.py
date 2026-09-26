@@ -328,6 +328,75 @@ def card():
     print("  note: Luhn/format prior can reject or flag impossible reconstructions.")
 
 
+def _clean_chars(text: str) -> list[str]:
+    """Ordered list of the a-z0-9 chars in `text` (spaces/punct dropped)."""
+    return [c for c in text.lower() if c in CLS_IDX]
+
+
+def wavcal():
+    """Confound-free CALIBRATION from a RAW phone recording (Harrison-style: record
+    on the phone itself at 17cm on a cloth, NOT as a Continuity mic which strips
+    click transients). Type a known transcript N times into one Voice Memo, export
+    the .wav, then: capture.py wavcal <wav> "<exact transcript you typed>".
+    We take the len(transcript) strongest onsets (slow typing -> clean) and align
+    them 1:1 in order to the transcript, so no keylogger sync is needed."""
+    from keyguard import audio
+    from keyguard.attackers.supervised import SupervisedAttacker
+    wav = sys.argv[2]
+    transcript = " ".join(sys.argv[3:]) or (
+        "the quick brown fox jumps over the lazy dog 0123456789 0123456789 "
+        "0123456789 0123456789")
+    y = audio.load(wav)
+    chars = _clean_chars(transcript)
+    on = segment.onsets_n(y, len(chars))
+    n = min(len(on), len(chars))
+    print(f"transcript {len(chars)} keys, detected {len(on)} onsets -> using {n}")
+    if abs(len(on) - len(chars)) > 0.1 * len(chars):
+        print("  WARN: onset/char mismatch >10% — re-record slower/quieter room")
+    m = features.mel(segment.windows(y, on[:n]))
+    Y = np.array([CLS_IDX[c] for c in chars[:n]])
+    atk = SupervisedAttacker()
+    try:
+        atk.load("runs/supervised_mbp.pt"); print("warm-started from Harrison")
+    except Exception:
+        pass
+    for p in list(atk.net.b1.parameters()) + list(atk.net.b2.parameters()):
+        p.requires_grad = False
+    atk.fit(m, Y, epochs=150, lr=5e-4,
+            log=lambda e, l: print(f"   ft ep{e} loss {l:.3f}"))
+    atk.save("runs/live_attacker.pt")
+    print("saved runs/live_attacker.pt")
+
+
+def wavcard():
+    """Decode a RAW phone recording of a slowly-typed number, offline, against the
+    known digits. capture.py wavcard <wav> <the_number_you_typed>."""
+    from keyguard import audio
+    from keyguard.attackers.supervised import SupervisedAttacker
+    from keyguard.config import CLASSES
+    import os
+    wav, truth = sys.argv[2], sys.argv[3]
+    digits = "".join(c for c in truth if c.isdigit())
+    atk = SupervisedAttacker()
+    for w in (os.environ.get("KEYGUARD_ATTACKER"), "runs/live_attacker.pt",
+              "runs/supervised_mbp.pt"):
+        if w:
+            try: atk.load(w); print(f"attacker: {w}"); break
+            except Exception: continue
+    y = audio.load(wav)
+    on = segment.onsets_n(y, len(digits))
+    proba = atk.predict_proba(features.mel(segment.windows(y, on[:len(digits)])))
+    digit_idx = np.array([CLS_IDX[d] for d in "0123456789"])
+    restr = "".join("0123456789"[j] for j in proba[:, digit_idx].argmax(1))
+    raw = "".join(atk.classes[i] for i in proba.argmax(1))
+    nn = min(len(restr), len(digits))
+    acc = sum(restr[i] == digits[i] for i in range(nn)) / max(1, len(digits))
+    print(f"\n  ground truth      : {digits}")
+    print(f"  ATTACK (raw 36-way): {raw}")
+    print(f"  ATTACK (digit-only): {restr}   per-digit {acc:.0%}"
+          f"   exact={'YES' if restr == digits else 'no'}")
+
+
 def selfcheck():
     """Offline: timestamp->window alignment works without any hardware."""
     y = np.zeros(SR * 2, np.float32)
@@ -345,4 +414,5 @@ def selfcheck():
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "selfcheck"
     {"calibrate": calibrate, "demo": demo, "bank": bank, "card": card,
-     "selfcheck": selfcheck}.get(mode, selfcheck)()
+     "wavcal": wavcal, "wavcard": wavcard, "selfcheck": selfcheck}.get(
+        mode, selfcheck)()
