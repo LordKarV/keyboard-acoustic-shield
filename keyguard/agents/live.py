@@ -287,6 +287,38 @@ def _save_sample(y, ev, out_dir="data/continuous/live"):
     print(f"  saved overlap sample -> {out_dir}/{name} ({len(keys)} keys, labels.jsonl appended)")
 
 
+_COLLECT_TEXTS = [
+    "the quick brown fox jumps over the lazy dog while i talk about my day",
+    "please send the report by five pm and cc the whole team thanks so much",
+    "my account number is 4829 and the code is 17305 do not share it",
+    "i am typing quickly and naturally as if writing a real email right now",
+    "meeting notes from today cover budget timeline and the new hire plan",
+    "password ideas hunter2 sunflower99 and correcthorsebatterystaple lol",
+    "call me at 5551234567 or reach me on the usual channel later tonight",
+    "the weather is nice so we might go for a walk after lunch around noon",
+    "shipping address is 42 baker street apartment 7 london postal code aa1",
+    "just finished the draft will review it once more before we ship it out",
+]
+
+
+def collect(n=12, secs=25):
+    """Bulk-collect REAL typing for training: shows a prompt, you type it (vary
+    speed, talk/cough sometimes for noise coverage), saves each as a SKAID-format
+    sample. Run on the machine whose mic hears the keys (e.g. your Mac), then push
+    data/continuous/live/ and we retrain. Aim for ~15-30 min total (~1-3k keys)."""
+    print(f"Collecting {n} sessions x ~{secs}s. Type each prompt naturally; vary "
+          f"speed and occasionally talk/cough for noise coverage.\n")
+    for i in range(n):
+        pr = _COLLECT_TEXTS[i % len(_COLLECT_TEXTS)]
+        try:
+            input(f"  [{i+1}/{n}] ENTER, then type (~{secs}s):\n     {pr}\n  > ")
+        except EOFError:
+            print("  (run in a terminal)"); return
+        y, ev = _record(secs)
+        _save_sample(y, ev)
+    print("\ndone. push data/continuous/live/ (labels.jsonl + wavs) and we retrain.")
+
+
 def record(secs, defend=False):
     net, ck = _load_net()
     y, ev = _record(secs)
@@ -321,6 +353,7 @@ if __name__ == "__main__":
     sub.add_parser("calibrate")
     dp = sub.add_parser("diag"); dp.add_argument("--secs", type=float, default=6.0)
     bp = sub.add_parser("bank"); bp.add_argument("--per-key", type=int, default=20); bp.add_argument("--missing", action="store_true")
+    cp = sub.add_parser("collect"); cp.add_argument("--n", type=int, default=12); cp.add_argument("--secs", type=float, default=25)
     rp = sub.add_parser("record"); rp.add_argument("--secs", type=float, default=20); rp.add_argument("--defend", action="store_true")
     a = ap.parse_args()
     import os
@@ -336,5 +369,7 @@ if __name__ == "__main__":
         diag(a.secs)
     elif a.cmd == "bank":
         bank(per_key=a.per_key, missing_only=a.missing)
+    elif a.cmd == "collect":
+        collect(a.n, a.secs)
     else:
         record(a.secs, a.defend)
