@@ -57,6 +57,14 @@ canvas{width:100%;height:90px;background:var(--panel2);border-radius:10px;border
   background:var(--panel2);border-radius:10px;border:1px solid var(--line);padding:10px;white-space:pre-wrap;line-height:1.6}
 .arena-log .win{color:var(--accent)} .arena-log .claw{color:var(--warn)}
 @media(max-width:720px){.arena-grid{grid-template-columns:1fr}}
+.agent-flow{display:flex;align-items:stretch;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.af-box{flex:1;min-width:120px;text-align:center;padding:10px 8px;border-radius:10px;
+  font-size:13px;font-weight:600;border:1px solid var(--line);background:var(--panel2)}
+.af-box small{display:block;font-weight:400;color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
+.af-red{border-color:var(--danger);color:var(--danger)} .af-blue{border-color:var(--blue);color:var(--blue)}
+.af-green{border-color:var(--accent);color:var(--accent)} .af-amber{border-color:var(--warn);color:var(--warn)}
+.af-arrow{align-self:center;color:var(--dim);font-size:18px}
+@media(max-width:720px){.agent-flow{flex-direction:column}.af-arrow{transform:rotate(90deg)}}
 /* table */
 table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{padding:8px 10px;text-align:center;border:1px solid var(--line)}
@@ -117,16 +125,18 @@ td.rowh{text-align:left;color:var(--dim)}
   <p class="sub">Three attackers versus one shield. <span class="dot" style="background:var(--accent)"></span>implemented &nbsp; <span class="dot" style="background:var(--planned)"></span>planned</p>
   <div class="grid-pipes" id="pipes"></div>
 
-  <h2>Adversarial arena — the min-max arms race <span class="pill" id="arenaPill">no run</span></h2>
-  <p class="sub">The real defense: shield <b>D</b> vs a <b>retraining</b> attacker <b>A</b>. D crushes A to chance; A retrains and claws back; D re-solves against it — round after round, at a fixed <b>inaudible −18 dB</b> budget. Real numbers, streamed live from co-training.</p>
+  <h2>Adversarial arena — one shield vs a population of attackers <span class="pill" id="arenaPill">no run</span></h2>
+  <p class="sub">The real defense: shield <b>D</b> optimizes ONE inaudible perturbation against a whole <b>population of diverse attacker agents</b> at once. Each round every agent retrains against D and claws back; D re-solves against the entire retrained population — so this isn't overfit to one network. Real numbers, streamed live, at a fixed <b>inaudible −18 dB</b> budget.</p>
+  <div class="agent-flow">
+    <span class="af-box af-red">Attacker agents<br><small>population · Pillar 1</small></span><span class="af-arrow">→</span>
+    <span class="af-box af-blue">Gemini language agent<br><small>Pillar 2</small></span><span class="af-arrow">→</span>
+    <span class="af-box af-green">Defender D<br><small>the shield</small></span><span class="af-arrow">→</span>
+    <span class="af-box af-amber">Perceptual Critic<br><small>STOI / PESQ / Whisper</small></span>
+  </div>
   <div class="panel">
     <div class="controls">
       <button id="arenaBtn">▶ Replay arms race</button>
-      <span class="legend">
-        <span><span class="dot" style="background:var(--danger)"></span>unprotected attacker</span>
-        <span><span class="dot" style="background:var(--warn)"></span>attacker after retraining</span>
-        <span><span class="dot" style="background:var(--accent)"></span>shielded (D wins the round)</span>
-      </span>
+      <span class="legend" id="arenaLegend"></span>
     </div>
     <div class="arena-grid">
       <canvas id="arenaChart" width="720" height="300" class="arena-chart"></canvas>
@@ -138,6 +148,13 @@ td.rowh{text-align:left;color:var(--dim)}
       </div>
     </div>
     <div id="arenaHeadline" style="margin-top:14px;font-size:15px;color:var(--ink)"></div>
+  </div>
+
+  <h2>The proof — leakage vs. speech preserved</h2>
+  <p class="sub">Every defense trades speech quality for privacy. Ours doesn't: attacker driven to chance <b>and</b> speech intact — and a different, unseen attacker architecture collapses to chance too (not overfit to one net).</p>
+  <div class="panel" style="padding:0;overflow:hidden">
+    <iframe src="/static/pareto.html" title="Leakage vs speech-preserved Pareto chart"
+      style="width:100%;height:520px;border:0;display:block;background:var(--panel2)"></iframe>
   </div>
 
   <h2>Results grid</h2>
@@ -192,7 +209,17 @@ fetch('/api/pipelines').then(r=>r.json()).then(d=>{
 
 /* ---------------- adversarial arena (min-max arms race) ---------------- */
 const C={accent:'#3ddc97',danger:'#ff5d5d',warn:'#ffb454',dim:'#8b98a8',grid:'#26313f'};
+// distinct color per attacker agent (population mode)
+const AGENT_COLORS=['#4aa8ff','#ffb454','#d17bff','#3ddc97','#ff8a5d','#6ee7ff'];
 let arena=null, arenaPoll=null, arenaAnim=null;
+
+const isPop=()=>arena&&arena.mode==='population';
+// ordered attacker names for population mode
+function agentNames(){
+  if(arena&&arena.attackers) return arena.attackers.map(a=>a.name);
+  const r0=arena&&arena.rounds&&arena.rounds[0];
+  return r0&&r0.per_attacker?Object.keys(r0.per_attacker):[];
+}
 
 function drawArena(reveal){
   const cv=$('#arenaChart'), g=cv.getContext('2d');
@@ -207,18 +234,50 @@ function drawArena(reveal){
   const py=v=>yBot+(yTop-yBot)*Math.max(0,Math.min(1,v));   // v 0..1 -> pixels
   const clean=arena.clean_acc??0.88, chance=arena.chance??0.028;
   // grid + y labels
-  g.font='11px system-ui'; g.lineWidth=1;
+  g.font='11px system-ui'; g.lineWidth=1; g.textAlign='left';
   [0,.25,.5,.75,1].forEach(v=>{ const y=py(v);
     g.strokeStyle=C.grid; g.beginPath(); g.moveTo(x0,y); g.lineTo(x1,y); g.stroke();
     g.fillStyle=C.dim; g.fillText((v*100).toFixed(0)+'%',6,y+4); });
   // unprotected baseline (dashed red) + chance (faint)
+  const baseLab=isPop()?'unprotected (mean) '+(clean*100).toFixed(0)+'%':'unprotected '+(clean*100).toFixed(0)+'%';
   g.setLineDash([6,4]); g.strokeStyle=C.danger; g.beginPath(); g.moveTo(x0,py(clean)); g.lineTo(x1,py(clean)); g.stroke();
-  g.setLineDash([]); g.fillStyle=C.danger; g.fillText('unprotected '+(clean*100).toFixed(0)+'%',x1-132,py(clean)-6);
+  g.setLineDash([]); g.fillStyle=C.danger; g.fillText(baseLab,x1-172,py(clean)-6);
   g.setLineDash([2,4]); g.strokeStyle=C.dim; g.beginPath(); g.moveTo(x0,py(chance)); g.lineTo(x1,py(chance)); g.stroke();
   g.setLineDash([]); g.fillStyle=C.dim; g.fillText('chance',x0+4,py(chance)-4);
   const pts=rounds.slice(0, reveal==null?rounds.length:reveal);
-  if(!pts.length) return;
-  // band: attacker's best effort (retrained) stays down near chance
+  if(!pts.length){ return; }
+  const xlab=()=>{ g.fillStyle=C.dim; g.textAlign='center';
+    pts.forEach(r=>g.fillText('r'+r.round,px(r.round),H-10)); g.textAlign='left'; };
+
+  if(isPop()){
+    const doneFinal=arena.status==='done'&&arena.final&&(reveal==null||reveal>=rounds.length);
+    const fx=maxR+ (doneFinal?1:0);           // extra x slot for the deployed-shield column
+    const pxF=i=>x0+(x1-x0)*(i/Math.max(1,fx));
+    agentNames().forEach((name,j)=>{
+      const col=AGENT_COLORS[j%AGENT_COLORS.length];
+      // dashed thin line: attacker after retraining (the claw-back D must beat)
+      g.setLineDash([5,4]); g.strokeStyle=col; g.lineWidth=1.4; g.globalAlpha=.85; g.beginPath();
+      pts.forEach((r,i)=>{const v=(r.per_attacker[name]||{}).retrained_acc??chance;
+        const x=pxF(r.round),y=py(v); i?g.lineTo(x,y):g.moveTo(x,y);}); g.stroke();
+      g.setLineDash([]); g.globalAlpha=1;
+      // solid thick line: shielded acc (D's move) — pinned at the chance floor
+      g.strokeStyle=col; g.lineWidth=2.4; g.beginPath();
+      pts.forEach((r,i)=>{const v=(r.per_attacker[name]||{}).shielded_acc??chance;
+        const x=pxF(r.round),y=py(v); i?g.lineTo(x,y):g.moveTo(x,y);});
+      if(doneFinal){const fv=(arena.final.per_attacker||{})[name]??chance; g.lineTo(pxF(fx),py(fv));}
+      g.stroke();
+      g.fillStyle=col; pts.forEach(r=>{const v=(r.per_attacker[name]||{}).shielded_acc??chance;
+        g.beginPath(); g.arc(pxF(r.round),py(v),3.5,0,7); g.fill();});
+      if(doneFinal){const fv=(arena.final.per_attacker||{})[name]??chance;
+        g.beginPath(); g.arc(pxF(fx),py(fv),3.5,0,7); g.fill();}
+    });
+    // x labels (rounds + final deployed-shield column)
+    g.fillStyle=C.dim; g.textAlign='center';
+    pts.forEach(r=>g.fillText('r'+r.round,pxF(r.round),H-10));
+    if(doneFinal) g.fillText('deployed',pxF(fx),H-10);
+    g.textAlign='left'; return;
+  }
+  // ---- single-adversary mode (legacy) ----
   g.fillStyle='rgba(255,180,84,.12)'; g.beginPath(); g.moveTo(px(pts[0].round),py(chance));
   pts.forEach(r=>g.lineTo(px(r.round),py(r.retrained_acc)));
   g.lineTo(px(pts[pts.length-1].round),py(chance)); g.closePath(); g.fill();
@@ -227,17 +286,47 @@ function drawArena(reveal){
     g.fillStyle=color; pts.forEach(r=>{g.beginPath(); g.arc(px(r.round),py(r[key]),4,0,7); g.fill();}); };
   line('retrained_acc',C.warn);
   line('shielded_acc',C.accent);
-  g.fillStyle=C.dim; g.textAlign='center';
-  pts.forEach(r=>g.fillText('r'+r.round,px(r.round),H-10)); g.textAlign='left';
+  xlab();
+}
+function renderLegend(){
+  const el=$('#arenaLegend'); if(!el) return;
+  if(isPop()){
+    el.innerHTML=`<span><span class="dot" style="background:${C.danger}"></span>unprotected</span>`
+      +agentNames().map((n,j)=>`<span><span class="dot" style="background:${AGENT_COLORS[j%AGENT_COLORS.length]}"></span>${n}</span>`).join('')
+      +`<span style="color:var(--dim)">— solid = shielded (D), dashed = after retrain</span>`;
+  }else{
+    el.innerHTML=`<span><span class="dot" style="background:${C.danger}"></span>unprotected attacker</span>`
+      +`<span><span class="dot" style="background:${C.warn}"></span>attacker after retraining</span>`
+      +`<span><span class="dot" style="background:${C.accent}"></span>shielded (D wins the round)</span>`;
+  }
 }
 function arenaLogLine(r){
   const el=$('#arenaLog');
-  el.innerHTML+=`round ${r.round}: D shields → <span class="win">${(r.shielded_acc*100).toFixed(1)}%</span>`
-    +`  ·  A retrains → <span class="claw">${(r.retrained_acc*100).toFixed(1)}%</span>\n`;
+  if(isPop()){
+    const names=agentNames();
+    const worst=Math.max(...names.map(n=>(r.per_attacker[n]||{}).retrained_acc??0));
+    el.innerHTML+=`round ${r.round}: D re-solves vs population · worst retrained <span class="claw">${(worst*100).toFixed(1)}%</span>\n`
+      +names.map(n=>{const p=r.per_attacker[n]||{};
+        return `   ${n}: shield <span class="win">${((p.shielded_acc||0)*100).toFixed(1)}%</span> → retrain <span class="claw">${((p.retrained_acc||0)*100).toFixed(1)}%</span>`;}).join('\n')+'\n';
+  }else{
+    el.innerHTML+=`round ${r.round}: D shields → <span class="win">${(r.shielded_acc*100).toFixed(1)}%</span>`
+      +`  ·  A retrains → <span class="claw">${(r.retrained_acc*100).toFixed(1)}%</span>\n`;
+  }
   el.scrollTop=el.scrollHeight;
 }
 function arenaHeadline(){
   if(!arena||!arena.rounds.length) return;
+  if(isPop()){
+    const names=agentNames();
+    const clawback=Math.max(...arena.rounds.flatMap(r=>names.map(n=>(r.per_attacker[n]||{}).retrained_acc??0)));
+    const topClean=Math.max(...(arena.attackers||[]).map(a=>a.clean_acc||0), arena.clean_acc||0);
+    const wf=(arena.final&&arena.final.worst_final_shielded);
+    const worst=(wf!=null?wf:arena.chance);
+    $('#arenaHeadline').innerHTML=`<b>D defeats a population of ${names.length} attacker architectures</b> with one inaudible −18 dB perturbation. `
+      +`Unprotected they read up to <b style="color:${C.danger}">${(topClean*100).toFixed(0)}%</b> of keys. `
+      +`Every agent retrains and claws back (to <b style="color:${C.warn}">${(clawback*100).toFixed(0)}%</b>) — but D re-solves against the whole retrained population, and its final shield holds <b>all ${names.length}</b> at <b style="color:${C.accent}">${(worst*100).toFixed(1)}%</b> — chance.`;
+    return;
+  }
   const clean=arena.clean_acc, worst=Math.max(...arena.rounds.map(r=>r.retrained_acc));
   const drop=Math.round((clean-worst)*100);
   $('#arenaHeadline').innerHTML=`Unprotected, the attacker reads <b style="color:${C.danger}">${(clean*100).toFixed(0)}%</b> of keys. `
@@ -252,7 +341,7 @@ function renderHistory(h){
 }
 async function loadArena(animate){
   let d; try{ d=await (await fetch('/api/arena')).json(); }catch(e){ return; }
-  arena=d.latest; renderHistory(d.history);
+  arena=d.latest; renderHistory(d.history); renderLegend();
   $('#arenaPill').textContent = !arena?'no run'
     : arena.status==='running'?'running…':((arena.created||'').slice(5,16).replace('T',' ')||'done');
   if(!arena){ drawArena(); return; }
