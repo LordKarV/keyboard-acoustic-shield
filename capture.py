@@ -152,8 +152,13 @@ def _record_prompt(prompt, seconds=None):
 
 def calibrate():
     """Type the charset a few times to fine-tune the attacker to this keyboard."""
+    import os
     from keyguard.attackers.supervised import SupervisedAttacker
-    charset = "the quick brown fox jumps over the lazy dog 1234567890"
+    # digit-heavy: card mode needs ~25 samples/digit, so repeat the digit block
+    # KEYGUARD_DIGIT_REPS times/round (default 4 -> ~24/digit over 6 rounds).
+    reps = int(os.environ.get("KEYGUARD_DIGIT_REPS", "4"))
+    charset = ("the quick brown fox jumps over the lazy dog "
+               + "0123456789 " * reps).strip()
     ROUNDS = 6
     Xs, ys = [], []
     for r in range(ROUNDS):
