@@ -269,11 +269,30 @@ def bank(per_key=20, secs_per_key=9.0, out="data/live_bank.npz", missing_only=Fa
               "then: python -m keyguard.agents.live record --secs 20")
 
 
+def _save_sample(y, ev, out_dir="data/continuous/live"):
+    """Append this recording as a SKAID-format sample the GPU trainer ingests via
+    KEYGUARD_SKAID=<out_dir>/labels.jsonl. Row schema matches continuous_convert.py."""
+    import os, json, time
+    import soundfile as sf
+    keys = [e for e in ev if e["key"] in SYM_OF_KEY]
+    if len(keys) < 4:
+        print("  (too few keys — sample not saved)"); return
+    os.makedirs(out_dir, exist_ok=True)
+    name = f"live_{int(time.time())}.wav"
+    sf.write(os.path.join(out_dir, name), y, SR)
+    row = {"wav": name, "keys": "".join(e["key"] for e in keys),
+           "onset_samples": [int(e["t"] * SR) for e in keys]}
+    with open(os.path.join(out_dir, "labels.jsonl"), "a") as f:
+        f.write(json.dumps(row) + "\n")
+    print(f"  saved overlap sample -> {out_dir}/{name} ({len(keys)} keys, labels.jsonl appended)")
+
+
 def record(secs, defend=False):
     net, ck = _load_net()
     y, ev = _record(secs)
     typed = "".join(e["key"] for e in ev if e["key"] in SYM_OF_KEY)
     read = DA.decode(net, y)
+    _save_sample(y, ev)   # persist raw overlap wav + labels for GPU-side retraining
     print(f"\nattacker model: {ck}")
     print(f"YOU TYPED : {typed}")
     print(f"ATTACKER  : {read}   (CER {cer_str(typed, read):.0%})")
