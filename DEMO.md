@@ -1,9 +1,17 @@
-# KeyGuard — The Arms Race 🎙️🛡️
+# KeyGuard — The Arms Race ⚔️🦉
 
 **Your keyboard is a microphone.** Every key you press has a distinct sound. We
-trained an AI that *listens to your typing and reads what you wrote* — then built an
-LLM-driven defender that fights it in a live **arms race**. That escalating
-attacker-vs-defender loop is the demo.
+trained **Ares** ⚔️, an AI that *listens to your typing and reads what you wrote* —
+then built **Athena** 🦉, an LLM defender that fights it in a live **arms race**.
+That escalating attacker-vs-defender loop is the demo.
+
+- **Ares** (attacker): CNN+BiGRU+CTC keystroke reader + an LLM that reconstructs text.
+- **Athena** (defender): an LLM strategist that triages your secret and plants a
+  believable *decoy* with an inaudible adversarial perturbation.
+
+**▶ Visual arena:** open `keyguard/web/arena.html` in a browser (it reads
+`keyguard/web/arms_race_data.js`, regenerated on every run) — combatant panels, a
+move-by-move feed, and an evolution timeline of speech-quality vs. budget.
 
 ---
 

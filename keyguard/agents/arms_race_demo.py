@@ -181,16 +181,16 @@ def main():
     _r = (llm.ask(ATK_SYS, f'Noisy transcription: "{raw0}"\nMost likely typed text:') or "")
     _r = _r.strip().strip('"').strip()
     llm0 = (_r.splitlines()[0][:90] if len(_r) >= 6 else raw0)
-    print("── ROUND 0 · ATTACK ─────────────────────────────────────────────")
-    print(f"🎙  ATTACKER (acoustic) reads : {raw0}")
-    print(f"🧠 ATTACKER-LLM reconstructs : {llm0}   ← LLM turns noise into the secret\n")
+    print("── ROUND 0 · ARES ATTACKS ─────────────────────────────────────────────")
+    print(f"⚔️  ARES (acoustic) reads : {raw0}")
+    print(f"🧠 ARES-LLM reconstructs  : {llm0}   ← LLM turns noise into the secret\n")
 
     # ---- DEFENDER-LLM: triage + deception plan ----
     plan = defender_plan(a.line)
     secret = a.secret or plan["sensitive"]
     decoy = plan["decoy"] if not a.secret else llm.rule_decoy(secret)
-    print("── DEFENDER · LLM PLAN ──────────────────────────────────────────")
-    print(f"🛡  DEFENDER-LLM: sensitive = {secret!r} ({plan['kind']})")
+    print("── ATHENA · LLM PLAN ──────────────────────────────────────────")
+    print(f"🦉 ATHENA-LLM: sensitive = {secret!r} ({plan['kind']})")
     print(f"    reason      = {plan.get('reason','')[:80]}")
     print(f"    DECOY to plant = {decoy!r}   ← a coherent lie, not noise (LLM-essential)\n")
 
@@ -202,11 +202,11 @@ def main():
     def mv(agent, title, reasoning="", action="", result="", tag=""):
         moves.append({"agent": agent, "title": title, "reasoning": reasoning,
                       "action": action, "result": result, "tag": tag})
-    mv("🎙️ ATTACKER", "Opening read (no defense)",
+    mv("⚔️ ARES", "Opening read (no defense)",
        action="Transcribe the keystroke audio, then reconstruct with the LLM.",
        result=f'acoustic: `{raw0}`  →  LLM: “{llm0.strip()[:80]}”',
        tag="🔓 secret region exposed")
-    mv("🛡️ DEFENDER", "Triage + deception plan (LLM)",
+    mv("🦉 ATHENA", "Triage + deception plan (LLM)",
        reasoning=plan.get("reason", "") or f"{secret} looks like a {plan['kind']}.",
        action=f"Mark `{secret}` sensitive; fabricate a coherent decoy `{decoy}`.",
        result=f"Plan: steer the attacker to read `{decoy}` instead of `{secret}`.",
@@ -220,6 +220,7 @@ def main():
 
     snr = a.snr
     log = {"line": a.line, "secret": secret, "decoy": decoy, "kind": plan["kind"],
+           "attacker": "Ares", "defender": "Athena",
            "backend": llm.backend(), "clean_span_read": clean_span, "rounds": []}
     y_def = y
     for r in range(a.rounds):
@@ -233,7 +234,7 @@ def main():
         log["rounds"].append({"round": r, "mode": "deceive", "span_read": span,
                               "reads_true_secret": reads_true, "stoi": info["stoi"],
                               "snr_db": info["snr_db"], "decoy": decoy})
-        mv("🛡️ DEFENDER", f"Deploy shield (round {r})",
+        mv("🦉 ATHENA", f"Deploy shield (round {r})",
            action=f"Optimize an inaudible perturbation over the secret's span to "
                   f"steer it toward `{decoy}` (budget {snr:.0f} dB, ‖δ‖≤ε).",
            result=f"attacker now reads `{_clean(span)}` · STOI **{info['stoi']:.3f}** "
@@ -248,7 +249,7 @@ def main():
                   f"  {'(broke through!)' if broke_true else '(still fooled)'}")
             log["rounds"][-1]["after_retrain_read"] = broke
             log["rounds"][-1]["after_retrain_reads_true"] = broke_true
-            mv("🎙️ ATTACKER", f"Evolve — retrain on the shielded audio (round {r})",
+            mv("⚔️ ARES", f"Evolve — retrain on the shielded audio (round {r})",
                action="Fine-tune on the defended clip to learn through this exact shield.",
                result=f"now reads `{_clean(broke)}`",
                tag="🔓 broke through!" if broke_true else "🎭 still fooled")
@@ -263,7 +264,7 @@ def main():
                 prev = decoy
                 if len(nd) == len(secret):
                     decoy = nd
-                mv("🛡️ DEFENDER", "Escalate (LLM)",
+                mv("🦉 ATHENA", "Escalate (LLM)",
                    reasoning="Attacker adapted to the last shield; spend more budget "
                              "and switch the lie so the stale one can't be trusted.",
                    action=f"Lower SNR budget to {snr:.0f} dB"
@@ -294,6 +295,8 @@ def main():
     RUNS.mkdir(exist_ok=True)
     (RUNS / "arms_race_demo.json").write_text(json.dumps(log, indent=2))
     write_replay(moves, log, final_read)
+    log["moves"] = moves
+    write_web(log)
     print(f"\nsaved {RUNS/'arms_race_demo.json'}  and  ARMS_RACE_REPLAY.md")
 
 
@@ -301,7 +304,7 @@ def write_replay(moves, log, final_read):
     """Emit a clean, move-by-move 'match replay' MD — the interpretable centrepiece."""
     from ..config import ROOT
     L = []
-    L.append("# KeyGuard — Arms Race Replay 🎙️🛡️\n")
+    L.append("# KeyGuard — Arms Race Replay ⚔️🦉\n")
     L.append("> Move-by-move log of one live match: an acoustic keystroke **attacker** "
              "vs an LLM **defender**, on the user's own MacBook keys. Each side *evolves* "
              "in response to the other, under a hard perceptual budget (the audio must "
@@ -311,8 +314,8 @@ def write_replay(moves, log, final_read):
              f"**LLM backend:** `{log['backend']}`\n")
     L.append("| | | |")
     L.append("|---|---|---|")
-    L.append(f"| 🎙️ Attacker | CNN+BiGRU+CTC + Attacker-LLM | reads keystrokes from sound |")
-    L.append(f"| 🛡️ Defender | Adversarial shield + Defender-LLM | plants a believable *decoy* |")
+    L.append(f"| ⚔️ **ARES** (attacker) | CNN+BiGRU+CTC + LLM | reads keystrokes from sound |")
+    L.append(f"| 🦉 **ATHENA** (defender) | Adversarial shield + LLM | plants a believable *decoy* |")
     L.append("\n---\n")
     for i, m in enumerate(moves):
         L.append(f"### Move {i} — {m['agent']}: {m['title']}")
@@ -330,7 +333,7 @@ def write_replay(moves, log, final_read):
     L.append("| round | defender plants | attacker reads | speech (STOI) | budget | who's ahead |")
     L.append("|---|---|---|---|---|---|")
     for rd in log["rounds"]:
-        ahead = "🛡️ defender" if not rd.get("reads_true_secret") else "🎙️ attacker"
+        ahead = "🦉 Athena" if not rd.get("reads_true_secret") else "⚔️ Ares"
         L.append(f"| {rd['round']} | `{rd['decoy']}` | `{_clean(rd['span_read'])}` | "
                  f"{rd['stoi']:.3f} | {rd['snr_db']:.0f} dB | {ahead} |")
         if "after_retrain_read" in rd:
@@ -351,6 +354,15 @@ def write_replay(moves, log, final_read):
              "acoustics (attack) and reasoning about *what* to protect and *what lie to "
              "plant* (defense). A fixed transform can do neither.")
     (ROOT / "ARMS_RACE_REPLAY.md").write_text("\n".join(L), encoding="utf-8")
+
+
+def write_web(log):
+    """Emit keyguard/web/arms_race_data.js so arena.html visualizes THIS run."""
+    from ..config import ROOT
+    web = ROOT / "keyguard" / "web"
+    web.mkdir(parents=True, exist_ok=True)
+    (web / "arms_race_data.js").write_text(
+        "window.ARMS_RACE = " + json.dumps(log, indent=2) + ";\n", encoding="utf-8")
 
 
 def _match(read: str, secret: str) -> bool:
