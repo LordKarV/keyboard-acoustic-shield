@@ -39,6 +39,7 @@ from ..ctc.model import DEVICE, logmel, greedy_decode
 from ..ctc.train_overlap import MtlCRNN, frame_key_target
 from ..agents.defense_audio import decode, span_read, craft, torch_logmel
 from ..agents import llm
+from .. import memory
 from ..agents import smart_dict as SD
 
 
@@ -114,7 +115,7 @@ def span_bounds(kstr, onsets, secret):
 
 def defender_plan(true_text: str) -> dict:
     """LLM triage + decoy; falls back to rule-based if the LLM is unavailable."""
-    j = llm.ask_json(DEF_SYS,
+    j = llm.ask_json(DEF_SYS, agent="athena", prompt=
                      f'The user typed: "{true_text}".\n'
                      'Return {"sensitive": "<exact token as typed, letters/digits only, '
                      'UPPERCASE>", "kind": "<password|code|account|pin|card>", '
@@ -186,7 +187,7 @@ def main():
 
     # ---- ROUND 0: the attack succeeds ----
     raw0 = decode(net, y)
-    _r = (llm.ask(ATK_SYS, f'Noisy transcription: "{raw0}"\nMost likely typed text:') or "")
+    _r = (llm.ask(ATK_SYS, f'Noisy transcription: "{raw0}"\nMost likely typed text:', agent="ares") or "")
     _r = _r.strip().strip('"').strip()
     llm0 = (_r.splitlines()[0][:90] if len(_r) >= 6 else raw0)
     print("── ROUND 0 · ARES ATTACKS ─────────────────────────────────────────────")
@@ -285,7 +286,7 @@ def main():
             if broke_true and info["stoi"] > a.floor:
                 snr = max(6.0, snr - 3.0)     # spend more budget (still bounded)
                 # optionally ask the LLM for a fresh decoy given the feedback
-                nd = llm.ask(DEF_SYS, f'The attacker broke through and read "{broke}". '
+                nd = llm.ask(DEF_SYS, agent="athena", prompt=f'The attacker broke through and read "{broke}". '
                              f'Give ONE new same-length same-shape decoy for "{secret}". '
                              f'Reply with only the decoy token.').strip().upper()
                 nd = "".join(c for c in nd if c in SYM_OF_KEY and c != " ")
@@ -345,6 +346,14 @@ def main():
     write_replay(moves, log, final_read)
     log["moves"] = moves
     write_web(log)
+    rs = log["rounds"]
+    memory.remember(   # local JSONL always + Backboard mirror: Ares' and Athena's shared run history
+        f"Arms race ({plan['kind']}, {len(rs)} rounds): Athena planted decoy {decoy!r}; Ares broke through "
+        f"{sum(bool(r.get('after_retrain_reads_true')) for r in rs)} time(s); final read {_clean(final_span)!r}, "
+        f"secret {'protected' if not _match(final_span, secret) else 'LEAKED'} at STOI {rs[-1]['stoi']:.3f}, "
+        f"budget {rs[-1]['snr_db']:.1f} dB.",
+        metadata={"leaked": bool(_match(final_span, secret)), "rounds": len(rs), "decoy": decoy,
+                  "stoi": float(rs[-1]["stoi"])}, kind="arms_race")
     print(f"\nsaved {RUNS/'arms_race_demo.json'}  and  ARMS_RACE_REPLAY.md")
 
 

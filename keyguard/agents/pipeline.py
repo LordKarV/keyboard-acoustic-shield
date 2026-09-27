@@ -178,7 +178,7 @@ def scenario(attacker, defender):
             f"then read {dec2!r}.", metadata={"kind": "agent_round"}, kind="agent_round")
 
 
-def run(n=1, ckpt="runs/ctc_skaid_crnn.pt", do_scenario=True):
+def run(n=1, ckpt="runs/ctc_rich_ft.pt", do_scenario=True):
     if not available():
         print("BACKBOARD_API_KEY not set (.env) — agents need it. Aborting.")
         return
@@ -188,7 +188,7 @@ def run(n=1, ckpt="runs/ctc_skaid_crnn.pt", do_scenario=True):
     net = (T.MtlCRNN if T.MODEL == "crnn" else T.MtlCTC)().to(DEVICE)
     net.load_state_dict(torch.load(ckpt, map_location=DEVICE)); net.eval()
 
-    attacker = BackboardAgent("attacker-agent", ATTACKER_SYS, memory="off")
+    attacker = BackboardAgent("attacker-agent", ATTACKER_SYS, memory="auto")
     defender = BackboardAgent("defender-agent", DEFENDER_SYS, memory="auto")
 
     # pick plausible-length real clips
@@ -242,7 +242,7 @@ def run(n=1, ckpt="runs/ctc_skaid_crnn.pt", do_scenario=True):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=1, help="# real SKAID clips for the attacker-decode grounding")
-    ap.add_argument("--ckpt", default="runs/ctc_skaid_crnn.pt")
+    ap.add_argument("--ckpt", default="runs/ctc_rich_ft.pt")  # current Ares; ctc_skaid_crnn.pt predates space (37 syms)
     ap.add_argument("--no-scenario", action="store_true", help="skip the planted-secret defender showcase")
     a = ap.parse_args()
     run(a.n, a.ckpt, do_scenario=not a.no_scenario)

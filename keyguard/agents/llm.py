@@ -43,8 +43,29 @@ def _gemini(system: str, prompt: str, temperature: float = 0.4) -> str:
     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
-def ask(system: str, prompt: str, temperature: float = 0.4) -> str:
-    """Plain-text LLM reply; '' on failure (caller falls back)."""
+_AGENTS: dict = {}
+
+
+def _agent_ask(agent: str, system: str, prompt: str) -> str:
+    """A named persistent Backboard agent (kg-<agent>) with memory='auto': it recalls what it learned in earlier
+    rounds and runs (Backboard is the LLM and the memory store). '' when no key or on failure."""
+    if not os.environ.get("BACKBOARD_API_KEY"):
+        return ""
+    from .backboard_agent import BackboardAgent
+    a = _AGENTS.get(agent) or _AGENTS.setdefault(agent, BackboardAgent(agent, system, memory="auto"))
+    try:
+        return a.ask(prompt) or ""
+    except Exception:
+        return ""
+
+
+def ask(system: str, prompt: str, temperature: float = 0.4, agent: str | None = None) -> str:
+    """Plain-text LLM reply; '' on failure (caller falls back). `agent` (e.g. "ares", "athena") routes through that
+    agent's Backboard memory first, then the usual Gemini -> Backboard chain."""
+    if agent:
+        txt = _agent_ask(agent, system, prompt)
+        if txt:
+            return txt
     b = backend()
     try:
         if b == "gemini":
@@ -57,9 +78,9 @@ def ask(system: str, prompt: str, temperature: float = 0.4) -> str:
     return ""
 
 
-def ask_json(system: str, prompt: str, temperature: float = 0.2) -> dict:
+def ask_json(system: str, prompt: str, temperature: float = 0.2, agent: str | None = None) -> dict:
     """Ask for JSON and parse the first object; {} on failure."""
-    txt = ask(system, prompt + "\n\nRespond with ONLY a JSON object.", temperature)
+    txt = ask(system, prompt + "\n\nRespond with ONLY a JSON object.", temperature, agent=agent)
     if not txt:
         return {}
     m = re.search(r"\{.*\}", txt, re.DOTALL)
