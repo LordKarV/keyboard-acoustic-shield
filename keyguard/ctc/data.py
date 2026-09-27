@@ -92,9 +92,36 @@ WORDS = ("the quick brown fox jumps over a lazy dog my password is hunter two "
          "login admin secret code four two zero seven nine one three").split()
 
 
+@lru_cache(maxsize=1)
+def _broad_words():
+    """A large English vocabulary for DIVERSE synth phrases so an overlap-trained
+    model sees broad letter/digraph coverage (not a few memorized phrases). Falls
+    back to the small WORDS list if wordfreq is unavailable. Set KEYGUARD_BROAD=0
+    to force the small list."""
+    import os
+    if os.environ.get("KEYGUARD_BROAD", "1") == "0":
+        return WORDS
+    try:
+        from wordfreq import top_n_list
+        ws = [w.upper() for w in top_n_list("en", 8000)
+              if w.isalpha() and w.isascii()]
+        return ws or WORDS
+    except Exception:
+        return WORDS
+
+
 def random_text(rng, n_words=(4, 9)):
-    k = rng.integers(*n_words)
-    return " ".join(rng.choice(WORDS) for _ in range(k))
+    k = int(rng.integers(*n_words))
+    vocab = _broad_words()
+    out = []
+    for _ in range(k):
+        # ~12% of tokens are digit runs so the model keeps digit coverage.
+        if rng.random() < 0.12:
+            out.append("".join(str(int(rng.integers(0, 10)))
+                               for _ in range(int(rng.integers(1, 6)))))
+        else:
+            out.append(vocab[int(rng.integers(len(vocab)))])
+    return " ".join(out)
 
 
 def batch(rng, n=8, **kw):

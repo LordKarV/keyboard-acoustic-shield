@@ -291,6 +291,15 @@ def _save_sample(y, ev, out_dir="data/continuous/live"):
     keys = [e for e in ev if e["key"] in SYM_OF_KEY]
     if len(keys) < 4:
         print("  (too few keys — sample not saved)"); return
+    # Dead-mic guard: a silent recording (mic muted / wrong device / no permission)
+    # is worthless and, if trained on, forces the model to memorize text from
+    # silence. Reject it loudly instead of saving garbage.
+    rms = float(np.sqrt(np.mean(np.square(np.asarray(y, dtype=np.float64)))))
+    if rms < 1e-3:
+        print(f"  !! MIC SILENT (rms={rms:.2e}) — NOT saved. The mic captured no "
+              f"audio.\n     Fix: check mic permission/mute, pick the right input "
+              f"with `devices`/`--device`, then retry.")
+        return
     os.makedirs(out_dir, exist_ok=True)
     name = f"live_{int(time.time())}.wav"
     sf.write(os.path.join(out_dir, name), y, SR)
@@ -301,36 +310,79 @@ def _save_sample(y, ev, out_dir="data/continuous/live"):
     print(f"  saved overlap sample -> {out_dir}/{name} ({len(keys)} keys, labels.jsonl appended)")
 
 
+# DIVERSE, key-balanced prompt bank. Generalization needs the model to see MANY
+# different words/digraphs, not the same phrase repeated — repeated phrases make
+# the net memorize text instead of learning per-key acoustics. Multiple distinct
+# pangrams (full A-Z coverage) + wide everyday vocabulary + digit runs.
 _COLLECT_TEXTS = [
-    "the quick brown fox jumps over the lazy dog while i talk about my day",
-    "please send the report by five pm and cc the whole team thanks so much",
-    "my account number is 4829 and the code is 17305 do not share it",
-    "i am typing quickly and naturally as if writing a real email right now",
-    "meeting notes from today cover budget timeline and the new hire plan",
-    "password ideas hunter2 sunflower99 and correcthorsebatterystaple lol",
-    "call me at 5551234567 or reach me on the usual channel later tonight",
-    "the weather is nice so we might go for a walk after lunch around noon",
-    "shipping address is 42 baker street apartment 7 london postal code aa1",
-    "just finished the draft will review it once more before we ship it out",
+    # pangrams (each covers all 26 letters)
+    "the quick brown fox jumps over the lazy dog",
+    "pack my box with five dozen liquor jugs",
+    "how vexingly quick daft zebras jump",
+    "the five boxing wizards jump quickly",
+    "sphinx of black quartz judge my vow",
+    "jackdaws love my big sphinx of quartz",
+    "we promptly judged antique ivory buckles for the next prize",
+    "grumpy wizards make toxic brew for the evil queen and jack",
+    # varied natural sentences (different vocabulary each)
+    "she sells seashells beside the sunny shore every summer morning",
+    "our flight departs at seven so we should leave home by four thirty",
+    "the museum exhibit featured ancient pottery glassware and jewelry",
+    "he whispered that the treasure was buried beneath the old oak tree",
+    "modern engines convert chemical energy into motion with great efficiency",
+    "curious children explored the dusty attic looking for hidden letters",
+    "the chef garnished the plate with basil thyme and a squeeze of lemon",
+    "volunteers gathered downtown to plant maple trees along the avenue",
+    "quantum computers exploit superposition to explore many states at once",
+    "a gentle breeze carried the scent of pine across the quiet valley",
+    "the journalist verified every quote before publishing the exclusive story",
+    "grandma baked cinnamon rolls while jazz played softly in the kitchen",
+    "the hikers followed the winding trail up the rugged snowy mountain",
+    "please water the ferns twice a week and keep them out of direct light",
+    "the committee will vote on the zoning proposal next thursday evening",
+    "brilliant fireworks exploded above the harbor as the crowd cheered loudly",
+    # numbers / mixed
+    "order 3 boxes of size 12 bolts and 7 packs of 40 washers by friday",
+    "the invoice total is 1284 dollars due within 30 days of receipt",
+    "flight 726 boards at gate 19 and lands around 8 45 local time",
+    "call 8005551212 for support or dial extension 4073 during work hours",
 ]
 
 
-def collect(n=12, secs=25):
+def collect(n=24, secs=25):
     """Bulk-collect REAL typing for training: shows a prompt, you type it (vary
     speed, talk/cough sometimes for noise coverage), saves each as a SKAID-format
     sample. Run on the machine whose mic hears the keys (e.g. your Mac), then push
-    data/continuous/live/ and we retrain. Aim for ~15-30 min total (~1-3k keys)."""
-    print(f"Collecting {n} sessions x ~{secs}s. Type each prompt naturally; vary "
-          f"speed and occasionally talk/cough for noise coverage.\n")
+    data/continuous/live/ and we retrain. Aim for ~15-30 min total (~1-3k keys).
+
+    Prompts are DISTINCT (shuffled, no repeats until the bank is exhausted) so the
+    attacker learns per-key acoustics instead of memorizing a few phrases. Each
+    saved clip is level-checked; a silent (dead-mic) recording is rejected, not
+    saved. Do ONE quick warm-up clip and confirm it saved before doing the rest."""
+    import random
+    order = list(range(len(_COLLECT_TEXTS)))
+    random.shuffle(order)
+    print(f"Collecting up to {n} sessions x ~{secs}s from {len(_COLLECT_TEXTS)} "
+          f"distinct prompts. Type each naturally; vary speed; occasionally "
+          f"talk/cough for noise coverage.\n"
+          f"TIP: for best signal put a phone mic ~15cm from the keyboard (a far "
+          f"built-in mic is much weaker). Watch for the 'MIC SILENT' warning.\n")
+    saved = 0
     for i in range(n):
-        pr = _COLLECT_TEXTS[i % len(_COLLECT_TEXTS)]
+        pr = _COLLECT_TEXTS[order[i % len(order)]]
         try:
             input(f"  [{i+1}/{n}] ENTER, then type (~{secs}s):\n     {pr}\n  > ")
         except EOFError:
             print("  (run in a terminal)"); return
         y, ev = _record(secs)
+        import numpy as _np
+        rms = float(_np.sqrt(_np.mean(_np.square(_np.asarray(y, dtype=_np.float64)))))
+        print(f"     level rms={rms:.4f}  keys={sum(1 for e in ev if e['key'] in SYM_OF_KEY)}")
         _save_sample(y, ev)
-    print("\ndone. push data/continuous/live/ (labels.jsonl + wavs) and we retrain.")
+        if rms >= 1e-3:
+            saved += 1
+    print(f"\ndone. saved {saved}/{n} audible samples. push data/continuous/live/ "
+          f"(labels.jsonl + wavs) and we retrain.")
 
 
 def record(secs, defend=False):

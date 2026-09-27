@@ -72,7 +72,8 @@ BETA_ENT = float(os.environ.get("KEYGUARD_BETA_ENT", "0.0"))          # entropy 
 BETA_ENT0 = float(os.environ.get("KEYGUARD_BETA_ENT0", str(BETA_ENT)))  # entropy weight at step 0 (annealed -> BETA_ENT)
 ENT_ANNEAL = int(os.environ.get("KEYGUARD_ENT_ANNEAL", "0"))          # steps to anneal BETA_ENT0 -> BETA_ENT (0=off)
 MODEL = os.environ.get("KEYGUARD_MODEL", "crnn")                       # 'crnn' (BiGRU, best) or 'conv' (ConvCTC) encoder
-WPM_FULL = (140, 580)        # full speed range; curriculum reveals fast last
+WPM_FULL = (int(os.environ.get("KEYGUARD_WPM_LO", "140")),
+            int(os.environ.get("KEYGUARD_WPM_HI", "580")))  # synth speed range (match real typist)
 SKAID = os.environ.get("KEYGUARD_SKAID")   # path to real continuous-typing labels.jsonl
 CHUNK_S = float(os.environ.get("KEYGUARD_CHUNK_S", "5.0"))   # split long sessions
 
@@ -148,22 +149,66 @@ def _chunk_session(y, keys, onsets, aug, rng):
     return out
 
 
+# Split policy for real continuous data:
+#   "session" (default): held-out = every 5th session by wav name. Fast but, when a
+#      phrase is typed multiple times, the SAME text can land in both train and test
+#      -> the number is optimistic (partial text memorization).
+#   "phrase": held-out = whole PHRASE GROUPS (sessions sharing a normalized text).
+#      Test text is then NEVER seen during training -> honest generalization to novel
+#      text. This is the number to trust for the "reads my typing" claim.
+SPLIT = os.environ.get("KEYGUARD_SPLIT", "session")
+MIN_RMS = float(os.environ.get("KEYGUARD_MIN_RMS", "1e-3"))  # drop silent/dead-mic sessions
+
+
+def _phrase_key(keys: str) -> str:
+    """Normalized identity of a typed phrase (dedupe near-identical prompts)."""
+    return "".join(c for c in keys.upper() if c.isalnum())[:48]
+
+
 def load_skaid(path, seed=0, aug=True):
-    """Real continuous typing -> (train_chunks, test_chunks). Held-out = every 5th
-    session (whole sessions, so a test session's typist/recording is unseen)."""
+    """Real continuous typing -> (train_chunks, test_chunks). See SPLIT above."""
     import json
     rows = [json.loads(l) for l in open(path)]
     rows = [r for r in rows if r.get("keys") and r.get("onset_samples")]
+    rows = sorted(rows, key=lambda r: r["wav"])
+    # Drop silent/dead-mic recordings: training on silence->text is pure
+    # memorization and poisons generalization. Gate on waveform RMS.
+    def _ok(r):
+        wav = os.path.join(os.path.dirname(path), r["wav"])
+        if not os.path.exists(wav):
+            return False
+        y = audio.load(wav)
+        return float(np.sqrt(np.mean(np.square(y)))) >= MIN_RMS
+    n0 = len(rows)
+    rows = [r for r in rows if _ok(r)]
+    if len(rows) < n0:
+        print(f"audio gate: kept {len(rows)}/{n0} sessions (dropped {n0-len(rows)} "
+              f"silent/dead-mic, rms<{MIN_RMS})", flush=True)
+    # Decide which row indices are held out.
+    if SPLIT == "phrase":
+        groups: dict[str, list[int]] = {}
+        for i, r in enumerate(rows):
+            groups.setdefault(_phrase_key(r["keys"]), []).append(i)
+        gkeys = sorted(groups)
+        grng = np.random.default_rng(seed)
+        grng.shuffle(gkeys)
+        n_test = max(1, len(gkeys) // 5)
+        test_rows = {i for gk in gkeys[:n_test] for i in groups[gk]}
+        print(f"phrase split: {len(gkeys)} distinct phrases, {n_test} held out "
+              f"(test text unseen in train)", flush=True)
+    else:
+        test_rows = {i for i in range(len(rows)) if i % 5 == 0}
     rng = np.random.default_rng(seed)
     train, test = [], []
-    for i, r in enumerate(sorted(rows, key=lambda r: r["wav"])):
+    for i, r in enumerate(rows):
         wav = os.path.join(os.path.dirname(path), r["wav"])
         if not os.path.exists(wav):
             continue
         keys = [k for k in r["keys"].upper() if k in SYM_OF_KEY]
         on = [s for k, s in zip(r["keys"].upper(), r["onset_samples"]) if k in SYM_OF_KEY]
-        chunks = _chunk_session(audio.load(wav), keys, on, aug and i % 5 != 0, rng)
-        (test if i % 5 == 0 else train).append(chunks)
+        is_test = i in test_rows
+        chunks = _chunk_session(audio.load(wav), keys, on, aug and not is_test, rng)
+        (test if is_test else train).append(chunks)
     tr = [c for s in train for c in s]
     te = [c for s in test for c in s]
     tr.sort(key=lambda p: -p[4])                # easy (large gap) first for curriculum
@@ -290,8 +335,29 @@ def train():
         pool = build_pool(POOL)
         print(f"pool {len(pool)} synth lines (gap-sorted for curriculum); training...", flush=True)
 
+    # Source mixing (combined pretrain): fold extra real SKAID chunks and/or extra
+    # synth lines into the training pool so one run learns BOTH the target keyboard's
+    # per-key acoustics (synth-bank) AND real continuous-typing dynamics (SKAID).
+    mix_skaid = os.environ.get("KEYGUARD_MIX_SKAID")
+    mix_synth = int(os.environ.get("KEYGUARD_MIX_SYNTH", "0"))
+    if mix_skaid:
+        extra, _ = load_skaid(mix_skaid)
+        pool = pool + extra
+        print(f"mix +{len(extra)} SKAID real chunks -> pool {len(pool)}", flush=True)
+    if mix_synth > 0:
+        extra = build_pool(mix_synth)
+        pool = pool + extra
+        print(f"mix +{len(extra)} synth lines -> pool {len(pool)}", flush=True)
+    if mix_skaid or mix_synth:
+        pool.sort(key=lambda p: -p[4])          # re-sort combined pool for curriculum
+
     torch.manual_seed(0)
     net = (MtlCRNN if MODEL == "crnn" else MtlCTC)().to(DEVICE).train()
+    init = os.environ.get("KEYGUARD_INIT")   # warm-start weights (pretrain -> finetune)
+    if init and os.path.exists(init):
+        sd = torch.load(init, map_location=DEVICE)
+        missing, unexpected = net.load_state_dict(sd, strict=False)
+        print(f"warm-start from {init} (missing={len(missing)} unexpected={len(unexpected)})", flush=True)
     print(f"model={MODEL} params={sum(p.numel() for p in net.parameters())/1e6:.2f}M "
           f"onset={LAMBDA_ONSET} ent0={BETA_ENT0}->ent={BETA_ENT}@{ENT_ANNEAL}", flush=True)
     opt = torch.optim.AdamW(net.parameters(), lr=LR, weight_decay=1e-5)
