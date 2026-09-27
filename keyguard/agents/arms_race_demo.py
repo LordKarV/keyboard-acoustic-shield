@@ -39,6 +39,14 @@ from ..ctc.model import DEVICE, logmel, greedy_decode
 from ..ctc.train_overlap import MtlCRNN, frame_key_target
 from ..agents.defense_audio import decode, span_read, craft, torch_logmel
 from ..agents import llm
+from ..agents import smart_dict as SD
+
+
+def _num(x):
+    for u, d in [(1e12, "trillion"), (1e9, "billion"), (1e6, "million"), (1e3, "thousand")]:
+        if x >= u:
+            return f"{x/u:.1f} {d}"
+    return str(int(x))
 
 CKPT = os.environ.get("KEYGUARD_CKPT", "runs/ctc_rich_ft.pt")
 BANK = os.environ.get("KEYGUARD_BANK", "data/live_bank_rich.npz")
@@ -197,6 +205,18 @@ def main():
     lo, hi = span_bounds(kstr, onsets, secret)
     clean_span = span_read(net, y, lo, hi)
 
+    # ---- SMART DICTIONARY (no defense): rank the true secret among Ares's guesses ----
+    sd0 = SD.summarize(net, y, lo, hi, secret, decoy)
+    log_sd0 = dict(sd0)
+    rk = sd0["secret_rank"]
+    top5 = ", ".join(c["guess"] for c in sd0["top5"])
+    print("── ⚔ ARES · SMART DICTIONARY ────────────────────────────────────")
+    print(f"    search space {sd0['n_slots']} keys → {_num(sd0['search_space'])} combos")
+    print(f"    Ares' top guesses: {top5}")
+    print(f"    TRUE secret {secret!r} rank: "
+          f"{('#'+str(rk)) if rk else 'not in top '+str(sd0['shortlist'])}"
+          f"  of {sd0['shortlist']}\n")
+
     # move-by-move battle log for the replay MD
     moves = []
     def mv(agent, title, reasoning="", action="", result="", tag=""):
@@ -206,6 +226,13 @@ def main():
        action="Transcribe the keystroke audio, then reconstruct with the LLM.",
        result=f'acoustic: `{raw0}`  →  LLM: “{llm0.strip()[:80]}”',
        tag="🔓 secret region exposed")
+    mv("⚔️ ARES", "Smart-dictionary attack",
+       action=f"Rank candidate secrets from the per-key acoustics over the span "
+              f"(search space {_num(sd0['search_space'])}).",
+       result=(f"true secret `{secret}` is Ares' guess **#{rk}** of {sd0['shortlist']} "
+               f"(top: {top5})") if rk else
+              (f"true secret not in Ares' top {sd0['shortlist']} (top: {top5})"),
+       tag=(f"🔓 password in top {rk}" if rk and rk <= 10 else "🔓 shortlisted"))
     mv("🦉 ATHENA", "Triage + deception plan (LLM)",
        reasoning=plan.get("reason", "") or f"{secret} looks like a {plan['kind']}.",
        action=f"Mark `{secret}` sensitive; fabricate a coherent decoy `{decoy}`.",
@@ -221,7 +248,8 @@ def main():
     snr = a.snr
     log = {"line": a.line, "secret": secret, "decoy": decoy, "kind": plan["kind"],
            "attacker": "Ares", "defender": "Athena",
-           "backend": llm.backend(), "clean_span_read": clean_span, "rounds": []}
+           "backend": llm.backend(), "clean_span_read": clean_span,
+           "smart_dict_clean": log_sd0, "rounds": []}
     y_def = y
     for r in range(a.rounds):
         # Defender re-optimizes the shield vs the CURRENT attacker (deception).
@@ -286,6 +314,26 @@ def main():
           "inaudible; and the defender re-blinds the attacker every time it adapts.")
 
     final_span = span_read(net, y_def, lo, hi)
+
+    # ---- SMART DICTIONARY (after defense): the rank of the true secret collapses ----
+    sdD = SD.summarize(net, y_def, lo, hi, secret, decoy)
+    log["smart_dict_defended"] = sdD
+    rkD, rkDecoy = sdD["secret_rank"], sdD["decoy_rank"]
+    top5D = ", ".join(c["guess"] for c in sdD["top5"])
+    print("\n── ⚔ ARES · SMART DICTIONARY (after Athena's shield) ─────────────")
+    print(f"    Ares' top guesses now: {top5D}")
+    print(f"    TRUE secret {secret!r} rank: "
+          f"{('#'+str(rkD)) if rkD else 'GONE (not in top '+str(sdD['shortlist'])+')'}"
+          f"   |  decoy {decoy!r} rank: {('#'+str(rkDecoy)) if rkDecoy else '—'}")
+    mv("⚔️ ARES", "Smart-dictionary attack (under shield)",
+       action="Re-rank candidate secrets from the defended audio.",
+       result=(f"true secret `{secret}` "
+               + (f"crashed to **#{rkD}**" if rkD else
+                  f"**fell out of the top {sdD['shortlist']}**")
+               + (f"; the decoy `{decoy}` is now #{rkDecoy}" if rkDecoy else "")
+               + f". (was #{rk} before)"),
+       tag="🛡️ guess list poisoned")
+
     mv("🏁 OUTCOME", "Final state",
        result=f"attacker's last read of the secret span: `{_clean(final_span)}` "
               f"(aiming for decoy `{decoy}`, true secret `{secret}`); "
@@ -316,6 +364,26 @@ def write_replay(moves, log, final_read):
     L.append("|---|---|---|")
     L.append(f"| ⚔️ **ARES** (attacker) | CNN+BiGRU+CTC + LLM | reads keystrokes from sound |")
     L.append(f"| 🦉 **ATHENA** (defender) | Adversarial shield + LLM | plants a believable *decoy* |")
+    # smart-dictionary headline (the scary stat)
+    sc, sd = log.get("smart_dict_clean"), log.get("smart_dict_defended")
+    if sc:
+        def _n(x):
+            for u, d in [(1e12,"T"),(1e9,"B"),(1e6,"M"),(1e3,"K")]:
+                if x>=u: return f"{x/u:.1f}{d}"
+            return str(int(x))
+        rk = sc.get("secret_rank"); rkD = sd.get("secret_rank") if sd else None
+        L.append("\n### 🔓 Smart-dictionary attack (the stakes)\n")
+        L.append(f"Ares ranks candidate secrets from the keystroke acoustics — "
+                 f"turning **{_n(sc['search_space'])}** possibilities into a top-"
+                 f"{sc['shortlist']} shortlist:\n")
+        L.append("| | true secret's rank | Ares' top guesses |")
+        L.append("|---|---|---|")
+        L.append(f"| **No defense** | {'#'+str(rk) if rk else 'not shortlisted'} | "
+                 f"`{'`, `'.join(c['guess'] for c in sc['top5'])}` |")
+        if sd:
+            L.append(f"| **With Athena** | {'#'+str(rkD) if rkD else '**gone** — off the list'} | "
+                     f"`{'`, `'.join(c['guess'] for c in sd['top5'])}` |")
+        L.append("")
     L.append("\n---\n")
     for i, m in enumerate(moves):
         L.append(f"### Move {i} — {m['agent']}: {m['title']}")

@@ -87,6 +87,9 @@
     <div class="cell"><div class="lbl">🦉 Athena's decoy</div><div class="val mono" style="color:var(--athena)" id="s-decoy">—</div></div>
   </div>
 
+  <div class="section-title">🔓 Smart-dictionary attack — how few guesses to your secret</div>
+  <div class="chart" id="sd"></div>
+
   <div class="section-title">Evolution — speech stays untouched while Athena re-blinds Ares</div>
   <div class="chart"><div id="tl"></div>
     <div class="legend">
@@ -114,6 +117,10 @@ window.ARMS_RACE = window.ARMS_RACE || {
    {round:1,decoy:"FALCON9",span_read:"FALCOON",stoi:0.990,snr_db:13,reads_true_secret:false,after_retrain_read:"HUNTER2",after_retrain_reads_true:true},
    {round:2,decoy:"FALCON7",span_read:"FALCON",stoi:0.979,snr_db:10,reads_true_secret:false}
   ],
+  smart_dict_clean:{n_slots:7,search_space:78364164096,shortlist:50,secret_rank:8,decoy_rank:null,
+    top5:[{guess:"HUNTERY",prob:.092},{guess:"HUNTERP",prob:.091},{guess:"HUNTERW",prob:.081},{guess:"HUNTERT",prob:.07},{guess:"HUNTER1",prob:.063}]},
+  smart_dict_defended:{n_slots:7,search_space:78364164096,shortlist:50,secret_rank:null,decoy_rank:2,
+    top5:[{guess:"FALCONY",prob:.10},{guess:"FALCON7",prob:.096},{guess:"FALCONN",prob:.08},{guess:"FALCOND",prob:.07},{guess:"FALCORY",prob:.05}]},
   moves:[
    {agent:"⚔ ARES",title:"Opening read (no defense)",action:"Transcribe audio, then reconstruct with the LLM.",result:"acoustic: HEY … PASSWORD IS HUNTEFI2 … → LLM: hey meet me at noon my password is hunter2 thanks",tag:"🔓 secret exposed"},
    {agent:"🦉 ATHENA",title:"Triage + deception plan",reasoning:"HUNTER2 is a plaintext password.",action:"Fabricate a coherent decoy BADGER5.",result:"Plan: steer Ares to read BADGER5 instead of HUNTER2.",tag:"🎭 lie prepared"}
@@ -130,6 +137,42 @@ document.getElementById("s-true").textContent = D.secret||"—";
 document.getElementById("s-kind").textContent = D.kind||"";
 document.getElementById("s-read").textContent = clean(D.clean_span_read)||"—";
 document.getElementById("s-decoy").textContent = D.decoy||"—";
+
+// ---- smart-dictionary panel ----
+const num = x => x>=1e12?(x/1e12).toFixed(1)+" trillion":x>=1e9?(x/1e9).toFixed(1)+" billion":
+                 x>=1e6?(x/1e6).toFixed(1)+" million":x>=1e3?(x/1e3).toFixed(1)+"K":String(x|0);
+function sdList(sd,which){
+  if(!sd) return "";
+  const rk = sd.secret_rank;
+  const rankTxt = which==="clean"
+    ? (rk?`🔓 your secret is guess <b style="color:var(--ares)">#${rk}</b>`:`not in top ${sd.shortlist}`)
+    : (rk?`still shortlisted at #${rk}`:`✅ your secret <b style="color:var(--good)">fell off the list</b>`);
+  const rows = (sd.top5||[]).map((c,i)=>{
+    const isSecret = c.guess===(D.secret||"").toUpperCase();
+    const isDecoy  = c.guess===(D.decoy||"").toUpperCase();
+    const col = isSecret?"var(--ares)":isDecoy?"var(--athena)":"var(--ink)";
+    const tagx = isSecret?" ← real":isDecoy?" ← decoy":"";
+    const bar = Math.round((c.prob/(sd.top5[0].prob||1))*100);
+    return `<div style="display:flex;align-items:center;gap:8px;margin:3px 0">
+      <span style="width:16px;color:var(--muted);font-size:12px">${i+1}</span>
+      <span class="mono" style="color:${col};min-width:92px">${c.guess}${tagx}</span>
+      <span style="flex:1;height:7px;background:#0d1424;border-radius:4px;overflow:hidden">
+        <span style="display:block;height:100%;width:${bar}%;background:${col};opacity:.6"></span></span>
+      <span style="color:var(--muted);font-size:11px;width:38px;text-align:right">${(c.prob*100).toFixed(0)}%</span>
+    </div>`;
+  }).join("");
+  return `<div class="card" style="flex:1">
+    <div class="lbl" style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">
+      ${which==="clean"?"⚔ No defense":"🦉 With Athena"}</div>
+    <div style="margin:4px 0 10px">${rankTxt}</div>${rows}</div>`;
+}
+{
+  const sc=D.smart_dict_clean, sd=D.smart_dict_defended;
+  const head = sc?`Ares turns <b>${num(sc.search_space)}</b> possibilities (${sc.n_slots} keys) into a top-${sc.shortlist} shortlist.`:"";
+  document.getElementById("sd").innerHTML =
+    `<div style="color:var(--muted);font-size:13px;margin-bottom:10px">${head}</div>
+     <div style="display:flex;gap:12px;flex-wrap:wrap">${sdList(sc,"clean")}${sdList(sd,"defended")}</div>`;
+}
 
 // ---- moves feed ----
 const kind = a => /ARES/.test(a)?"ares":/ATHENA/.test(a)?"athena":"outcome";

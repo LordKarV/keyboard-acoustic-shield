@@ -58,6 +58,20 @@ LLM-defender re-optimizes and re-blinds it. That's the arms race.
 
 ---
 
+## The stakes: the smart-dictionary attack 🔓
+
+Ares doesn't just read characters — it turns the per-keystroke acoustics of your
+secret into a **ranked password guess-list**:
+
+| | your password's rank | Ares' top guesses |
+|---|---|---|
+| **No defense** | **#8–#21** of 50 | `HUNTERY`, `HUNTERP`, `HUNTERW`, … |
+| **With Athena** | **gone** — off the top-50 | `SHADOW*`, `FALCON*` (the decoy) |
+
+That's your real password narrowed from **~78 billion** possibilities (36⁷) to a
+handful — then **erased from the shortlist** once Athena engages, at STOI ≈ 0.98.
+(Acoustic-only ranking, no language prior — the honest hard case for a real password.)
+
 ## What's real (no hand-waving)
 
 **The attacker** (`runs/ctc_rich_ft.pt`) is a CNN+BiGRU+CTC keystroke transcriber
