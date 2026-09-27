@@ -1,135 +1,60 @@
-# Keyguard — Devpost
+# Keyguard
+
+**We can hear your password. Then we make it impossible.**
 
 ## Inspiration
-Recent papers (Harrison et al. 2023; Okada et al. 2026) showed you can read what
-someone types just from the *sound* of their keyboard on a Zoom call — up to 95%
-accuracy. Every remote meeting is now a keylogger. We wanted to prove the attack on
-our own machines and then actually kill it — in a way that survives an attacker who
-*fights back*, and where the AI is load-bearing rather than decorative.
+Your keyboard leaks. Every key has its own plate resonance, and recent work (Harrison et al. 2023) read keystrokes over Zoom at **93%** accuracy from sound alone. So anyone on a call with you is effectively running a keylogger. Standard defenses like white noise or muting are either audible or easy to filter out. We wanted a shield that a person can't hear and that still works when the attacker retrains to beat it.
 
 ## What it does
-- **Attack (two pillars).** *Pillar 1 — per-key acoustics:* plate resonance makes keys
-  distinguishable via per-key timing + spectral (plate-resonance) features; our
-  CoAtNet-style classifier hits **87.2% top-1** (chance 2.8%) on the public Harrison
-  dataset, and **37.8% top-1 / 57.1% top-3** on our own laptop-mic bank. *Pillar 2 — language redundancy:*
-  English is ~1 bit/char, so a CTC acoustic model + an LM/LLM correction turns weak,
-  ~38%-accurate keys into readable English. Random passwords are the honest hard case.
-- **Defense (the centerpiece): a perceptually-constrained adversarial shield.** A
-  small causal defender net **D** adds a bounded perturbation to the audio so that a
-  **retraining** attacker **A** can't read the keys — while a human, PESQ/STOI, *and*
-  Whisper still hear the original speech. Formally `min_D max_A Leakage(A(D(x)))`
-  subject to `Perceptual(D(x), x) <= eps`.
-- **Dashboard + demo.** A judge types a paragraph + fake password, watches the
-  attacker reconstruct it, flips the shield on, and watches the attack collapse while
-  the speech stays clear.
+Keyguard is an **attack and a defense**, and we show both live.
 
-## The meaningful-AI story (ML/AI track)
-Two places where AI is *essential*, not bolted on:
+**The attack has two pillars.**
+- **Acoustics:** a CoAtNet-style CNN on log-mel features reads single keystrokes at **87.2% top-1** (random guessing is 2.8% over 36 keys). For fast, overlapping free typing, a CRNN transcriber (BiGRU with an onset head) reads **real continuous typing from people it has never heard** at **~41% CER** (random is ~95%). Only one published system has read overlapping typing (Slater, ACSAC '19).
+- **Language:** English carries about 1 bit per character, so a weak acoustic signal is still enough. We give **Gemini** the attacker's per-key **top-3 candidate lattice**, and it reconstructs the text: `QBTTVPSE` becomes **`PASSWORD`**, and `NAAG1MH` becomes **`MEETING`**.
 
-1. **The adversarially-trained shield D.** The optimal defense depends on the current
-   attacker, which retrains — so **no fixed transform is optimal**, and the minimal
-   speech-preserving perturbation is defined *through the attacker's neural network*
-   (adversarial-example optimization + a psychoacoustic loss). There is no closed
-   form. D and A co-train GAN-style: A is the discriminator (can it read keys?), D is
-   the generator (make keys unreadable) under a hard STOI/PESQ + Whisper-intact
-   constraint. The "arena" *is* this D-vs-A training loop.
-2. **The language model on the attack side (Gemini).** Turning a weak acoustic
-   stream into readable text is a language-modeling problem. We feed the attacker's
-   **per-key top-3 candidate lattice** to **Gemini** (`gemini-flash-latest`), which
-   multiplies those weak guesses against English redundancy to reconstruct the typed
-   string — the lever that makes the attack real, and the honest reason the defense
-   has to exist. This is **verified live**: from a corrupted top-1 stream
-   `NAAG1MH` Gemini recovers `MEETING`, and from `OSAAEPTS` it recovers `PASSWORD`,
-   using only the top-3 lattice. Crucially, **with the shield on the lattice is
-   garbage, so even Gemini can't reconstruct** — in the live demo, a typed `HUNTER2`
-   reads at **100% (7/7) with no shield** but collapses to **28.6% (2/7)** with the
-   shield on, and Gemini cannot rescue the garbled lattice (`HUNTER2` → `B8NVA42`).
-   That `HUNTER2` is a random password is the honest hard case: no language prior,
-   so Pillar 2 has nothing to multiply against — and the shield still wins.
-   (`keyguard/attack_lm.py`, wired live into the dashboard's `/api/demo`.)
+**The defense is the centerpiece.** The shield **D** is a learned **universal adversarial perturbation**: a waveform about 18 dB quieter than a keystroke. It's added onto every keystroke at the exact moment your OS reports a key press, and it's trained against attackers **A** that keep retraining:
+
+$$
+\min_{D}\,\max_{A}\;\mathcal{L}_{\text{leak}}\big(A(D(x))\big)\quad\text{s.t.}\quad \mathcal{P}\big(D(x),\,x\big)\le\varepsilon
+$$
+
+- The attacker drops from **87.2% to 2.8% (random guessing) in every round**.
+- Arms race: a retraining attacker climbs back to 20.6% → 47.8% → 55.6%, and D re-solves and blinds it again each time.
+- **One perturbation defeats four different architectures at once** (SE-CNN, wide CNN, ResNet, frame-GRU), including a ResNet that had climbed back to 91% partway through the race.
+- A **transfer attacker it never trained against** also drops to 2.8%, so D isn't overfit to its sparring partners.
+- **Speech stays clear:** STOI 0.96. On the leakage vs. speech-quality Pareto chart, it sits alone in the safe corner, ahead of every noise-based baseline.
+
+## Why the AI has to be there
+Our first shield was plain signal processing: it used the OS key timestamps to inpaint each keystroke's STFT magnitude, randomize the leftover sound, and inject decoy clicks. It hurt a fixed attacker (CER 40.7% → 55.5%). Then we let the attacker **retrain on shielded audio**, and it went straight back to **39.4%**. **Rule-based defenses lose to an adaptive attacker. We measured that.** The fix of "just garble the keystroke band" wrecks speech and Whisper. What's left is a real min-max problem where the smallest perturbation that stays inaudible is defined *through the attacker's own network*. There's no closed-form answer, so the defense has to be learned.
 
 ## How we built it
-Python + PyTorch (MPS) for the models, librosa for the signal front-end, FastAPI +
-vanilla JS/SVG for the dashboard. The DSP shield is STFT magnitude inpainting
-conditioned on OS key-event timestamps (timing only, never the key). The adversarial
-shield (`keyguard/shield/adversarial.py`) is a learned bounded perturbation trained
-against a differentiable attacker with adversarial co-training rounds and a perceptual
-regularizer.
-
-## The reckoning that led to the reframe
-Our first shield was ~80% deterministic (keystroke removal + residue randomization +
-decoys) with an LLM tuning six config knobs in an "arena." We stopped and were honest
-with ourselves: you could just garble the keystroke band and it works, so the AI
-wasn't doing the real work — an LLM tuning six numbers is "AI-because-AI." The fix was
-to make the *constraint* the hard part. "Just garble it" is the trivial
-max-perturbation solution that **breaks Whisper and destroys overlapping speech** — it
-violates the perceptual constraint. Forcing transparency *and* privacy-robustness at
-once is a genuine min-max no rule solves, and that's what makes the neural shield
-necessary.
-
-## Novelty, honestly
-- **Attack:** a faithful reproduction/extension of prior work (Asonov & Agrawal 2004;
-  Harrison et al. 2023 — up to 95% lab / 93% Zoom; Slater ACSAC'19 for overlap CTC), not
-  a novel attack. Its job is to be a credible, reproducible threat that justifies the
-  defense.
-- **Defense:** the closest prior art is **EveGuard** (IEEE S&P 2025, arXiv 2411.10034) —
-  an adversarial-audio side-channel *defense*, but for the **vibration** channel
-  protecting **spoken speech**. To our knowledge Keyguard is the **first
-  perceptually-constrained adversarial shield for the acoustic *keystroke* side-channel**
-  (secret = typed text), adapting the adversarial-audio-privacy paradigm (EveGuard
-  S&P'25, AntiFake CCS'23) to a channel and secret it hasn't been applied to. We did not
-  invent adversarial-audio privacy and do not claim to have "solved" the vulnerability.
+- **Stack:** PyTorch (CUDA / MPS / CPU), librosa, FastAPI, and a vanilla JS/SVG dashboard.
+- **Front-end:** onset segmentation and log-mel features. We found and fixed a mismatch between our differentiable torch log-mel and librosa (STFT pad mode plus a missing 80 dB floor; correlation went from 0.956 to 1.0). That fix is what made the adversarial gradients line up with the real attacker.
+- **Overlap transcriber:** trained on **SKAID** (26 typists, 67k keystrokes). CTC collapsed to the English letter prior, and we traced three root causes: SpecAugment was shifting audio frames but not their labels, the curriculum was feeding mostly empty chunks, and logits were being shipped off the GPU. We replaced CTC with **class-weighted dense per-frame CE plus onset-BCE**. The attacker went from random-level output to reading real typing.
+- **Adversarial arena:** population co-training, streamed live to the dashboard. **Backboard** gives it memory across sessions: it records every attacker the shield has faced, so the defense is always evaluated against the full history.
+- **Live calibration:** a guided per-key recorder banks the target keyboard (including space, for word boundaries) and collects labeled real typing to fine-tune on.
+- **Demo resilience:** a cache-backed demo mode, so a noisy hall can't break the live moment.
 
 ## Challenges
-- **Signal strength.** Our laptop-mic keys are quiet; the isolated-key attack works
-  (37.8% top-1) but the free-typing CTC transcriber, which is pipeline-verified
-  (~4% CER on synthetic overlap), collapsed on the weak real signal — it emitted the
-  same common letters regardless of input. Bottleneck is the sensor, not the code.
-- **The deterministic-vs-AI reckoning** above — the honest realization that reframed
-  the whole defense.
-- **Tiny transient images.** Aggressive SpecAugment *hurt* the classifier; light
-  noise + jitter is what got us to 87.2%.
+- **Overlapping keystrokes:** clicks 24 ms apart, each ringing for 120 ms. Hand-tuned onset detectors capped recall at 56–78%, so we moved to learned per-frame onsets.
+- **Cross-keyboard generalization (honest negative result):** a model pooled across 8 keyboards scores **6.4% top-3** zero-shot on a keyboard it has never seen. Per-key acoustics are specific to each device, so a real attacker has to calibrate on your keyboard. That's why our live pipeline banks the target keyboard.
+- **Compute:** a loaded laptop and unreliable MPS, so we split training across a Mac and a CUDA GPU box, handing data off through git.
+
+## What we learned
+Rule-based privacy breaks as soon as the adversary can learn. Defenses have to be trained *against* adaptive attackers and constrained by human perception. An LLM turns a mediocre side-channel into a dangerous one.
 
 ## What's next
-- A stronger/fixed sensor (phone mic Harrison-style, or a contact/accelerometer sensor
-  via Arduino) + transfer-learning from Harrison, and a training-collapse fix
-  (multi-task onset head), to make free-typing generalize.
-- Push the adversarial co-training arena further. It runs on the **dashboard**
-  (`/api/arena`): at an inaudible -18 dB budget (chance 2.8%, 36 classes) the clean
-  attacker reads Harrison isolated keys at **87.2%**, the deployed shield drives it to
-  **2.8% (= chance) every round**, and a retraining attacker fighting a frozen shield
-  claws back to ~56% mid-game (**20.6% → 47.8% → 55.6% → 47.2% → 18.3%**) before D
-  re-solves and re-blinds it to **2.8%** — a real bouncing arms race D wins each round,
-  not a flat curve. Next: report the full leakage-vs-perceptual curve across rounds.
-- Real-time BlackHole virtual mic on the victim's side.
+- Run the learned shield against the adaptive overlap transcriber (right now it has been proven against single-key attackers).
+- Ship it as a real-time virtual mic (BlackHole) on the victim's side.
+- Extend it to other acoustic side channels on calls.
 
-## Prizes targeted
-One build, multiple entries — the same project, honestly framed for each.
+## Standing on the shoulders of
+Asonov & Agrawal '04 · Zhuang, Zhou & Tygar '05 · Cecconello et al., *Skype & Type* '19 · Slater et al., ACSAC '19 · Harrison, Toreini & Mehrnezhad '23 (2308.01074) · LLM-assisted keystroke correction (2504.11622, 2502.09782) · **EveGuard, IEEE S&P '25 (2411.10034)**, the closest prior defense (vibration channel, speech) · AntiFake, CCS '23 · Szegedy '13, Carlini & Wagner '18 · ASCA survey (2309.11012) and SoK (2308.03806).
 
-**Main tracks**
-- **AI/ML (primary):** AI is load-bearing in both directions — an adversarially-trained
-  min-max shield, and a language model (Gemini) that makes the acoustic attack readable.
-- **Social Good:** every remote meeting is now a silent keylogger. Keyguard is a
-  privacy shield that protects what people type during video calls — passwords,
-  medical notes, private messages — from acoustic surveillance, running victim-side
-  with zero cloud dependency. Same tech, human-impact framing.
-- **Meta (human connection):** we type our most private things while talking to the
-  people we trust; acoustic snooping poisons that. Keyguard makes remote conversation
-  safe to be candid in again.
-
-**Sponsor prizes (each genuinely used, not bolted on)**
-- **Best Use of Gemini:** Gemini is Pillar 2 of the attack — the language model that
-  reconstructs readable text from a weak per-key acoustic lattice, proving the threat
-  is real and that our shield defeats even an LLM-augmented attacker.
-- **Best Use of Backboard:** persistent adversarial memory for the shield's arena —
-  Backboard remembers every attacker architecture the shield has faced across
-  sessions, so the defense is evaluated against (and never regresses on) the full
-  remembered population of adversaries.
-- **Best .Tech Domain:** `keyguard.tech` for the live demo + landing page.
+**Novelty, stated carefully:** the attack reproduces and extends prior work. To our knowledge, Keyguard is the **first perceptually-constrained adversarial shield for the acoustic keystroke channel**, bringing EveGuard-style adversarial audio privacy to a new channel and a new secret.
 
 ## Ethics
-Only our own devices, consenting teammates and judges, and fake passwords. The threat
-model: the attacker is **remote** (far end of a video call) or a planted nearby device
-(a phone on the desk, Harrison-style). The shield runs on the *victim's* side as a
-virtual mic, using the victim's **own** OS key-event timestamps (timing only, never
-which key) — the asymmetry that lets it be surgical. Nothing here targets third parties.
+Only our own devices, consenting participants, and fake passwords. The shield runs on the victim's side and uses only the OS **timing** of key presses, never which key was pressed.
+
+## Built with
+Python · PyTorch · librosa · FastAPI · Gemini · Backboard · JavaScript · SVG
