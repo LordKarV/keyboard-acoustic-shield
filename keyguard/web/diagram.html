@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>KeyGuard — Diagram</title>
+<style>
+  body{margin:0;background:#f6f1e6;color:#2b2f38;
+       font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:960px;margin:0 auto;padding:26px 16px}
+  svg{width:100%;height:auto;display:block}
+  .t{font-weight:800} .s{fill:#6b7280}
+</style></head>
+<body><div class="wrap">
+<svg viewBox="0 0 900 560" role="img" aria-label="KeyGuard diagram">
+ <defs>
+   <marker id="ar" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#6b7280"/></marker>
+   <marker id="arR" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#e5544e"/></marker>
+   <marker id="arT" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#1fae9f"/></marker>
+   <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#00000022"/></filter>
+ </defs>
+
+ <text x="40" y="46" font-size="26" class="t">KeyGuard</text>
+ <text x="40" y="72" font-size="15" class="s">your keyboard is a microphone — an attacker reads it, a defender fools it</text>
+
+ <!-- keyboard audio (rounded rect) -->
+ <g filter="url(#sh)">
+   <rect x="40" y="250" width="170" height="86" rx="16" fill="#e7ecf3" stroke="#8aa0bd" stroke-width="2"/>
+ </g>
+ <text x="125" y="288" text-anchor="middle" font-size="17" class="t">⌨️ Keyboard</text>
+ <text x="125" y="311" text-anchor="middle" font-size="17" class="t">sound</text>
+
+ <!-- ARES (circle, agent) -->
+ <circle cx="400" cy="293" r="82" fill="#ffe0dc" stroke="#e5544e" stroke-width="3" filter="url(#sh)"/>
+ <text x="400" y="284" text-anchor="middle" font-size="22" class="t" fill="#c23b35">⚔️ ARES</text>
+ <text x="400" y="308" text-anchor="middle" font-size="14" fill="#a23a35">attacker</text>
+ <text x="400" y="328" text-anchor="middle" font-size="12.5" fill="#8a4b47">reads your password</text>
+
+ <!-- ATHENA (circle, agent) -->
+ <circle cx="700" cy="293" r="82" fill="#d7f4ef" stroke="#1fae9f" stroke-width="3" filter="url(#sh)"/>
+ <text x="700" y="284" text-anchor="middle" font-size="22" class="t" fill="#128577">🦉 ATHENA</text>
+ <text x="700" y="308" text-anchor="middle" font-size="14" fill="#137a6d">defender</text>
+ <text x="700" y="328" text-anchor="middle" font-size="12.5" fill="#2a6f66">plants a decoy</text>
+
+ <!-- keyboard -> ares -->
+ <line x1="212" y1="293" x2="314" y2="293" stroke="#6b7280" stroke-width="2.5" marker-end="url(#ar)"/>
+
+ <!-- ARMS RACE: two curved arrows between the agents -->
+ <path d="M470,255 C540,215 560,215 630,255" fill="none" stroke="#e5544e" stroke-width="2.5" marker-end="url(#arR)"/>
+ <path d="M630,333 C560,373 540,373 470,333" fill="none" stroke="#1fae9f" stroke-width="2.5" marker-end="url(#arT)"/>
+ <text x="550" y="196" text-anchor="middle" font-size="13" fill="#c23b35" class="t">reads the secret</text>
+ <text x="550" y="404" text-anchor="middle" font-size="13" fill="#128577" class="t">feeds back a decoy</text>
+ <text x="550" y="120" text-anchor="middle" font-size="15" class="t">ARMS RACE ⟳</text>
+ <line x1="500" y1="132" x2="600" y2="132" stroke="#c9c1ae" stroke-width="2"/>
+
+ <!-- athena -> outcome -->
+ <line x1="700" y1="377" x2="700" y2="452" stroke="#37a35f" stroke-width="2.5" marker-end="url(#ar)"/>
+
+ <!-- outcome (rounded rect) -->
+ <g filter="url(#sh)"><rect x="520" y="454" width="360" height="72" rx="16" fill="#dff3e2" stroke="#37a35f" stroke-width="2"/></g>
+ <text x="700" y="484" text-anchor="middle" font-size="16" class="t" fill="#1f7a45">🔒 password → 🎭 decoy</text>
+ <text x="700" y="507" text-anchor="middle" font-size="13.5" fill="#3a7d55">speech stays perfectly clear (inaudible change)</text>
+
+ <!-- legend -->
+ <g font-size="13">
+   <circle cx="52" cy="452" r="8" fill="#ffe0dc" stroke="#e5544e" stroke-width="2"/><text x="66" y="456" class="s">agent</text>
+   <rect x="150" y="445" width="16" height="14" rx="4" fill="#e7ecf3" stroke="#8aa0bd" stroke-width="2"/><text x="172" y="456" class="s">audio / result</text>
+ </g>
+</svg>
+</div></body></html>
