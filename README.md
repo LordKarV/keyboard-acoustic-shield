@@ -181,7 +181,7 @@ keyguard/
   synth.py                                      # speech+keystroke mixtures
   server.py web/index.html                      # dashboard
 data/harrison/   # Harrison et al. dataset (git-cloned, not committed)
-runs/            # trained models, results
+runs/            # trained models and results (created by training, not committed)
 ```
 
 ## Honest limits
@@ -208,3 +208,12 @@ runs/            # trained models, results
   (adversarial audio) and Schönherr et al. (psychoacoustic hiding) are the underlying
   lineage. We did not invent adversarial-audio privacy and do not claim to have "solved"
   the vulnerability.
+
+## Team
+
+Built at HackGT 2026 as the keystroke pillar of Athena. This repo is the work of
+Karthikeya Vattem ([@LordKarV](https://github.com/LordKarV)) and Dan Mano
+([@danmano411](https://github.com/danmano411)).
+
+Datasets and trained weights are not included. The Harrison dataset is fetched in
+Setup; everything under `data/` and `runs/` is produced by the scripts.
